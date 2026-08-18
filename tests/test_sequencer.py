@@ -62,10 +62,21 @@ class TestIntervalRuns:
 class TestPerFrameOverhead:
     """Regression: config reads and previews once cost more than the exposure."""
 
-    def test_config_is_not_read_every_frame(self, sequencer, camera_state, wait_for):
-        sequencer.start(Plan(frames=10, interval_s=0, start_delay_s=0))
+    def test_config_reads_do_not_scale_with_frame_count(self, sequencer, camera_state,
+                                                        wait_for):
+        """Setup costs are fine; per-frame costs are not."""
+        sequencer.start(Plan(frames=5, interval_s=0, start_delay_s=0))
         assert wait_for(lambda: not sequencer.running)
-        assert camera_state.calls["config"] <= 6
+        few = camera_state.calls["config"]
+
+        camera_state.calls["config"] = 0
+        sequencer.start(Plan(frames=25, interval_s=0, start_delay_s=0))
+        assert wait_for(lambda: not sequencer.running)
+        many = camera_state.calls["config"]
+
+        # Five times the frames must not mean five times the config reads.
+        assert many <= few + 2, (
+            f"{few} reads for 5 frames but {many} for 25 — reads scale per frame")
 
     def test_previews_are_throttled(self, sequencer, camera_state, wait_for):
         sequencer.start(Plan(frames=10, interval_s=0, start_delay_s=0))

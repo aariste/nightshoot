@@ -330,6 +330,7 @@ const PANELS = ['lvpanel','scriptpanel','lastpanel','logpanel','adminpanel','sys
 let paused = false, choicesLoaded = false, thumbStamp = 0;
 let dirty = new Set(), scriptIndex = {}, lvTimer = null;
 let wasReachable = true, wakeLock = null, lastSeq = {}, cardFreeImages = null, netTick = 0;
+let lastCam = {};
 
 // --- theme -----------------------------------------------------------------
 // Stored per device, so it survives reloads, browser restarts and Pi reboots.
@@ -556,6 +557,13 @@ function stopLiveview() {
 function bulbChanged() {
   const on = $('bulb').value === '1';
   $('exposure_s').disabled = !on;
+  // Some bodies have no bulb control over USB at all; say so rather than
+  // letting the sequence fail on the first frame.
+  if (on && lastCam.connected && lastCam.supports_bulb === false) {
+    toast('This camera does not expose a bulb control over USB.', true);
+    $('bulb').value = '0';
+    $('exposure_s').disabled = true;
+  }
   planSummary();
 }
 function planSummary() {
@@ -871,6 +879,7 @@ async function refresh() {
 
   const cam = d.camera || {}, seq = d.sequence || {};
   lastSeq = seq;
+  lastCam = cam;
 
   $('clock').textContent = d.now;
   // During a long exposure the countdown is the most useful thing on screen.

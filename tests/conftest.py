@@ -44,6 +44,9 @@ OTHER_CONSTANTS = [
     "GP_ERROR_TIMEOUT", "GP_ERROR_MODEL_NOT_FOUND",
 ]
 
+#: Widgets real drivers expose as on/off toggles rather than value lists.
+TOGGLE_WIDGETS = {"bulb", "viewfinder", "eosviewfinder", "liveview"}
+
 
 class FakeCameraState:
     """Everything a test might want to inspect or bend."""
@@ -119,9 +122,11 @@ def _build_module() -> types.ModuleType:
 
         def set_value(self, value):
             STATE.values[self._name] = value
-            # Closing the bulb shutter makes the camera write a file, exactly
-            # as the real one does.
-            if self._name == "bulb" and not value:
+            # Closing the shutter makes the camera write a file, exactly as a
+            # real one does — whichever mechanism this body uses for bulb.
+            closed = (self._name == "bulb" and not value) or (
+                self._name == "eosremoterelease" and str(value).startswith("Release"))
+            if closed:
                 STATE.counter += 1
                 STATE.pending_files.append(
                     CameraFilePath(f"DSC_{STATE.counter:04d}.NEF"))
@@ -130,7 +135,7 @@ def _build_module() -> types.ModuleType:
             return self._name in STATE.readonly
 
         def get_type(self):
-            if self._name in ("bulb", "viewfinder"):
+            if self._name in TOGGLE_WIDGETS:
                 return gp.GP_WIDGET_TOGGLE
             if self._name in STATE.choices:
                 return gp.GP_WIDGET_RADIO

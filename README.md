@@ -1,4 +1,4 @@
-# NightShoot — Raspberry Pi night intervalometer for the Nikon Z50
+# NightShoot — Raspberry Pi night intervalometer for gphoto2 cameras
 
 [![CI](https://github.com/OWNER/nightshoot/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/nightshoot/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -13,8 +13,11 @@ interface, and the Z50 is known to time out under that pattern
 holds one libgphoto2 session open for the whole night and reconnects only when
 the link genuinely drops.
 
-Other cameras supported by libgphoto2 should work — setting values are matched by
-meaning rather than by exact string — but the Z50 is what it is tested against.
+Other cameras supported by libgphoto2 should work — widget names are looked up
+through alias lists, setting values are matched by meaning rather than spelling,
+and features like bulb and live view are probed at connect time. See
+[Other cameras](#10-other-cameras) for what adapts automatically and what does
+not. The Z50 is what it is tested against on real hardware.
 
 ---
 
@@ -572,3 +575,64 @@ ruff check nightshoot tests
 `tests/conftest.py` substitutes a stub for the `gphoto2` module that mimics a
 Nikon Z50, down to its shutter-speed spellings. See [CONTRIBUTING.md](CONTRIBUTING.md)
 for the layout and the list of mistakes the tests exist to prevent.
+
+---
+
+## 10. Other cameras
+
+NightShoot is developed against a Nikon Z50, but nothing is hard-coded to it.
+Anything libgphoto2 supports should work; the suite exercises the same code
+against Canon- and Sony-shaped fakes as well as the Nikon one.
+
+### What adapts by itself
+
+**Widget names.** Vendors disagree: Nikon exposes `f-number` and `expprogram`,
+Canon uses `aperture` and `autoexposuremode`. Each setting is looked up through a
+list of candidates, so whichever your body uses is found.
+
+**Value spelling.** Nikon reports `0.0166s`, Canon reports `1/60`, and both mean
+the same exposure. Values are matched by meaning, so a script written for one
+body runs on the other:
+
+```yaml
+set: {shutterspeed: "1/60"}   # matches 0.0166s on a Nikon, 1/60 on a Canon
+set: {shutterspeed: "20"}     # matches 20.0000s or 20
+```
+
+**Bulb.** Nikon exposes a simple `bulb` toggle; Canon drives `eosremoterelease`
+with press/release values. NightShoot probes for whichever exists and uses it. A
+body with neither reports bulb as unsupported instead of failing on the first
+frame — the UI refuses to enable bulb mode and says why.
+
+**Live view.** Tried as `viewfinder`, `eosviewfinder` or `liveview`; bodies that
+start live view implicitly on preview also work.
+
+**Capture target.** "Memory card", "card" and "SDRAM" are all handled by matching
+against what the body actually lists.
+
+### What to expect
+
+| Brand | Expectation |
+|---|---|
+| **Nikon** | Tested on real hardware (Z50). Bulb, live view, burst all work. |
+| **Canon EOS** | Should work. Bulb goes through `eosremoterelease`. Untested on hardware. |
+| **Sony** | Basic capture and settings should work; many Sony bodies expose less over PTP, so bulb and capture target may be missing. |
+| **Others** | Anything in libgphoto2's [supported list](http://gphoto.org/proj/libgphoto2/support.php) is worth trying. |
+
+**This is honest guesswork outside Nikon.** The code adapts to the shapes those
+drivers present, and the tests prove it adapts, but only a real body proves it
+works. If you try another camera, `gphoto2 --list-config` and
+`gphoto2 --get-config shutterspeed` will show what it exposes — and a bug report
+with that output is enough to add support.
+
+### Checking a new body
+
+```bash
+gphoto2 --auto-detect                 # is it recognised at all?
+gphoto2 --summary                     # what the driver knows about it
+gphoto2 --list-config                 # every setting it exposes
+gphoto2 --get-config shutterspeed     # current value plus valid choices
+```
+
+Then connect it and look at the **Camera** panel. If shutter, ISO, aperture and
+format populate and a test frame works, the rest of NightShoot will follow.

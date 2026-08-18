@@ -1,9 +1,13 @@
-"""Persistent gphoto2 camera wrapper tuned for the Nikon Z50.
+"""Persistent gphoto2 camera wrapper.
 
 A single long-lived libgphoto2 session is held for the whole run. Spawning the
-gphoto2 CLI once per frame makes the Z50 re-claim the USB interface every shot,
-which is the main cause of "Could not claim the USB device" / PTP timeouts on a
-multi-hour night sequence.
+gphoto2 CLI once per frame makes the camera re-claim the USB interface every
+shot, which is the main cause of "Could not claim the USB device" / PTP timeouts
+on a multi-hour night sequence.
+
+Developed against a Nikon Z50, but nothing is hard-coded to it: widget names are
+looked up through alias lists, setting values are matched by meaning rather than
+spelling, and capabilities such as bulb and live view are probed at connect time.
 """
 
 from __future__ import annotations
@@ -19,20 +23,31 @@ import gphoto2 as gp
 
 log = logging.getLogger("nightshoot.camera")
 
-# Widget names the Nikon PTP driver exposes. Several have moved between
-# libgphoto2 versions, so each setting is looked up by a list of candidates.
+# Widget names vary by vendor and have moved between libgphoto2 versions, so
+# each setting is looked up by a list of candidates. Nikon names first, then
+# Canon and Sony equivalents.
 CONFIG_ALIASES = {
     "shutterspeed": ["shutterspeed", "shutterspeed2", "exptime"],
     "iso": ["iso", "isospeed"],
     "aperture": ["f-number", "aperture"],
     "imageformat": ["imageformat", "imagequality"],
     "capturetarget": ["capturetarget"],
-    "bulb": ["bulb"],
-    "exposuremode": ["expprogram", "autoexposuremode", "capturemode"],
-    "batterylevel": ["batterylevel"],
-    "focusmode": ["focusmode", "focusmode2"],
-    "longexpnr": ["longexpnr", "longexposurenoisereduction"],
+    "bulb": ["bulb", "eosremoterelease"],
+    "exposuremode": ["expprogram", "autoexposuremode", "capturemode", "shootingmode"],
+    "batterylevel": ["batterylevel", "batterylevelvalue"],
+    "focusmode": ["focusmode", "focusmode2", "eosfocusmode"],
+    "longexpnr": ["longexpnr", "longexposurenoisereduction", "noisereduction"],
+    "viewfinder": ["viewfinder", "eosviewfinder", "liveview"],
 }
+
+# How to hold the shutter open, in priority order. Nikon exposes a simple bulb
+# toggle; Canon drives its remote release with named press/release values.
+#   (widget, open value, close value)
+BULB_STRATEGIES = (
+    ("bulb", 1, 0),
+    ("eosremoterelease", "Immediate", "Release Full"),
+    ("eosremoterelease", "Press Full", "Release Full"),
+)
 
 # Widget type ids vary between libgphoto2 builds, so map them by name.
 WIDGET_TYPE_NAMES = {}
@@ -183,6 +198,7 @@ class Camera:
         self._storage_at = 0.0
         self._snapshot_cache: dict | None = None
         self._can_trigger: bool | None = None
+        self._bulb_strategy: tuple | None | bool = False   # False = not probed
         self._shutter_s: float | None = None
         self._shutter_at = 0.0
         # Fetching a preview JPEG costs far more than a fast frame does. At high
@@ -228,8 +244,8 @@ class Camera:
                     log.warning("connect attempt %d/%d failed: %s", attempt, retries, exc)
                     time.sleep(2 * attempt)
             raise CameraError(
-                f"no camera found ({last}). Check the USB cable, that the Z50 is "
-                f"powered on, and that nothing else has claimed it."
+                f"no camera found ({last}). Check the USB cable, that the camera "
+                f"is powered on, and that nothing else has claimed it."
             )
 
     def disconnect(self) -> None:
@@ -348,8 +364,8 @@ class Camera:
                 raise CameraError(f"this camera does not expose '{key}'")
             if widget.get_readonly():
                 raise CameraError(
-                    f"'{key}' is read-only right now. On the Z50 that usually means "
-                    f"the mode dial is not on M."
+                    f"'{key}' is read-only right now. That usually means the "
+                    f"mode dial is not on M, or the camera is in playback."
                 )
             wtype = widget.get_type()
             kind = WIDGET_TYPE_NAMES.get(wtype)
@@ -394,19 +410,23 @@ class Camera:
             except gp.GPhoto2Error as exc:
                 self._reconnect_if_fatal(exc)
                 raise CameraError(
-                    f"live view failed: {exc}. On the Z50 make sure the lens cap is "
-                    f"off, the camera is not in playback, and the mode dial is on M."
+                    f"live view failed: {exc}. Check that the lens cap is off, "
+                    f"the camera is not in playback, and the mode dial is on M."
                 ) from exc
             return bytes(memoryview(data))
 
     def set_liveview(self, enabled: bool) -> None:
-        """Nikon bodies need the 'viewfinder' flag flipped to stream live view."""
+        """Flip whichever live-view flag this body exposes.
+
+        Nikon and most PTP bodies call it 'viewfinder'; some Canon models use
+        'eosviewfinder'. Both are covered by the alias list.
+        """
         with self._lock:
             try:
                 self.set_setting("viewfinder", 1 if enabled else 0)
             except CameraError:
                 # Plenty of bodies start live view implicitly on capture_preview.
-                log.debug("no 'viewfinder' widget; relying on implicit live view")
+                log.debug("no live-view widget; relying on implicit live view")
 
     def snapshot(self) -> dict:
         """Everything the UI wants to show, read in one config pass.
@@ -439,7 +459,7 @@ class Camera:
                     out[key] = widget.get_value()
                 except gp.GPhoto2Error:
                     continue
-            out["supports_bulb"] = self._find_widget(cfg, "bulb") is not None
+            out["supports_bulb"] = self.bulb_strategy() is not None
             # Lets the UI count down the frame in progress.
             out["shutter_seconds"] = parse_duration(out.get("shutterspeed"))
             self._snapshot_cache = out
@@ -473,16 +493,29 @@ class Camera:
     def prepare_for_night(self, capture_to_card: bool = True) -> list[str]:
         """Apply the settings a night sequence depends on. Returns warnings."""
         warnings: list[str] = []
-        try:
-            self.set_setting("capturetarget", "Memory card" if capture_to_card else "Internal RAM")
-        except CameraError as exc:
-            warnings.append(f"capturetarget: {exc}")
+
+        # Vendors name these differently — Nikon says "Memory card", Canon may
+        # offer "card" or "SDRAM" — so pick from what this body actually lists
+        # rather than asserting one spelling.
+        targets = self.get_choices("capturetarget")
+        if targets:
+            wanted = ["Memory card", "card", "Card"] if capture_to_card \
+                else ["Internal RAM", "SDRAM", "RAM"]
+            for candidate in wanted:
+                match = next((t for t in targets
+                              if candidate.lower() in t.lower()), None)
+                if match:
+                    try:
+                        self.set_setting("capturetarget", match)
+                    except CameraError as exc:
+                        warnings.append(f"capturetarget: {exc}")
+                    break
 
         mode = self.get_setting("exposuremode")
         if mode is not None and str(mode).upper() not in ("M", "MANUAL"):
             warnings.append(
-                f"Camera is in '{mode}' mode. Set the Z50 mode dial to M or the "
-                f"shutter/ISO/aperture controls will be locked."
+                f"Camera is in '{mode}' mode. Set the mode dial to M, or the "
+                f"shutter, ISO and aperture controls will be locked."
             )
         if str(self.get_setting("longexpnr")).lower() in ("1", "on", "true"):
             warnings.append(
@@ -490,6 +523,18 @@ class Camera:
                 "exposure after every frame — turn it off for timelapse/star trails."
             )
         return warnings
+
+    def capabilities(self) -> dict:
+        """What this particular body supports, for the UI and troubleshooting."""
+        strategy = self.bulb_strategy()
+        return {
+            "model": self._model,
+            "bulb": strategy is not None,
+            "bulb_via": strategy[0] if strategy else None,
+            "trigger": self.supports_trigger(),
+            "liveview": self._find_widget(self._require().get_config(), "viewfinder") is not None,
+            "storage": self.storage() is not None,
+        }
 
     # ----------------------------------------------------------------- capture
 
@@ -565,11 +610,52 @@ class Camera:
         finally:
             self._lock.release()
 
+    def bulb_strategy(self) -> tuple | None:
+        """How this body holds the shutter open, or None if it cannot."""
+        if self._bulb_strategy is not False:
+            return self._bulb_strategy
+        self._bulb_strategy = None
+        try:
+            cfg = self._require().get_config()
+        except gp.GPhoto2Error:
+            return None
+        for name, open_value, close_value in BULB_STRATEGIES:
+            widget = None
+            try:
+                widget = cfg.get_child_by_name(name)
+            except gp.GPhoto2Error:
+                continue
+            # A named strategy must actually offer the values it needs.
+            kind = WIDGET_TYPE_NAMES.get(widget.get_type())
+            if kind in ("radio", "menu"):
+                choices = [widget.get_choice(i) for i in range(widget.count_choices())]
+                try:
+                    open_value = resolve_choice(name, open_value, choices)
+                    close_value = resolve_choice(name, close_value, choices)
+                except CameraError:
+                    continue
+            self._bulb_strategy = (name, open_value, close_value)
+            log.info("bulb via '%s' (%r / %r)", name, open_value, close_value)
+            break
+        return self._bulb_strategy
+
     def _capture_bulb(self, seconds: float):
-        """Nikon bulb: toggle the 'bulb' action, then collect the new file."""
+        """Hold the shutter open for a set time, then collect the new file.
+
+        Nikon exposes a simple 'bulb' toggle; Canon drives 'eosremoterelease'
+        with press/release values. Whichever this body has is used.
+        """
         cam = self._require()
+        strategy = self.bulb_strategy()
+        if strategy is None:
+            raise CameraError(
+                "this camera does not expose a bulb control over USB. Use a "
+                "shutter speed the camera itself offers instead."
+            )
+        name, open_value, close_value = strategy
+
         self._drain_events(200)
-        self.set_setting("bulb", 1)
+        self.set_setting(name, open_value)
         try:
             deadline = time.time() + seconds
             while True:
@@ -578,7 +664,7 @@ class Camera:
                     break
                 time.sleep(min(remaining, 0.25))
         finally:
-            self.set_setting("bulb", 0)
+            self.set_setting(name, close_value)
 
         # The file appears a moment after the shutter closes.
         end = time.time() + max(30.0, seconds * 0.5 + 15.0)
