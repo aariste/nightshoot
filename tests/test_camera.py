@@ -40,10 +40,26 @@ class TestResolveChoice:
             resolve_choice("shutterspeed", "22", Z50_SHUTTER)
         assert "Closest is" in str(exc.value)
 
+    def test_accepts_the_cameras_truncated_fast_speeds(self):
+        """1/4000 is 0.00025 s but a Z50 reports it as '0.0002s'."""
+        assert resolve_choice("shutterspeed", "1/4000", Z50_SHUTTER) == "0.0002s"
+        assert resolve_choice("shutterspeed", "1/3200", Z50_SHUTTER) == "0.0003s"
+        assert resolve_choice("shutterspeed", "1/1600", Z50_SHUTTER) == "0.0006s"
+        assert resolve_choice("shutterspeed", "1/800", Z50_SHUTTER) == "0.0012s"
+        assert resolve_choice("shutterspeed", "1/640", Z50_SHUTTER) == "0.0015s"
+        assert resolve_choice("shutterspeed", "1/320", Z50_SHUTTER) == "0.0031s"
+        assert resolve_choice("shutterspeed", "1/160", Z50_SHUTTER) == "0.0062s"
+
+    def test_truncation_tolerance_does_not_blur_slow_speeds(self):
+        """The absolute allowance must not let 22 s pass as 20 s."""
+        with pytest.raises(CameraError):
+            resolve_choice("shutterspeed", "22", Z50_SHUTTER)
+        with pytest.raises(CameraError):
+            resolve_choice("shutterspeed", "18", Z50_SHUTTER)
+
     def test_rejects_a_value_the_camera_cannot_reach(self):
         with pytest.raises(CameraError):
             resolve_choice("shutterspeed", "1/8000", Z50_SHUTTER)
-
     def test_long_option_lists_stay_readable(self):
         with pytest.raises(CameraError) as exc:
             resolve_choice("shutterspeed", "nonsense", Z50_SHUTTER)

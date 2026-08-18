@@ -77,6 +77,19 @@ _NUMERIC_RE = re.compile(r"^\s*([0-9]*\.?[0-9]+)\s*(?:s|sec|secs|seconds|\")?\s*
 _FRACTION_RE = re.compile(
     r"^\s*([0-9]*\.?[0-9]+)\s*/\s*([0-9]*\.?[0-9]+)\s*(?:s|sec|\")?\s*$", re.I)
 
+#: Cameras report durations truncated to four decimals, so 1/4000 (0.00025 s)
+#: comes back as '0.0002s'.
+TRUNCATION_DECIMALS = 4
+
+
+def _truncate4(value: float) -> float:
+    factor = 10 ** TRUNCATION_DECIMALS
+    return int(value * factor) / factor
+
+
+def _round4(value: float) -> float:
+    return round(value, TRUNCATION_DECIMALS)
+
 
 def parse_duration(text) -> float | None:
     """'20', '20.0000s', '1/60', '1/60s' -> seconds. None if not a duration."""
@@ -108,14 +121,24 @@ def resolve_choice(key: str, value, choices: list[str]) -> str:
         numeric = [(choice, seconds) for choice, seconds in numeric
                    if seconds is not None and seconds > 0]
         if numeric:
+            # Cameras report durations truncated to four decimals, so 1/4000
+            # (0.00025 s) arrives as '0.0002s'. Applying the same truncation to
+            # what the user asked for inverts that exactly, which beats
+            # nearest-match: 0.00025 is equidistant from 0.0002 and 0.0003.
+            for rounder in (_truncate4, _round4):
+                reduced = rounder(target)
+                for choice, seconds in numeric:
+                    if abs(seconds - reduced) < 1e-9:
+                        return choice
+
             best, best_error = None, None
             for choice, seconds in numeric:
                 # Relative error, because shutter speeds span 1/8000 s to 30 s.
                 error = abs(seconds - target) / target
                 if best_error is None or error < best_error:
                     best, best_error = choice, error
-            # 1% covers rounding like 1/60 -> 0.0166s without silently
-            # substituting a genuinely different exposure.
+            # 1% covers ordinary rounding without silently substituting a
+            # genuinely different exposure.
             if best_error is not None and best_error <= 0.01:
                 return best
             if best is not None:

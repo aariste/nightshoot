@@ -176,8 +176,10 @@ predicted finish, camera model, battery, and **free space on the camera card**
 (with an estimate of how many frames still fit). The Pi's own disk is only shown
 when downloading is turned on, because otherwise it is irrelevant.
 
-Shutter speeds are shown the way a photographer reads them — `20"`, `1/60` —
-even though the Z50 reports them internally as `20.0000s` and `0.0166s`.
+Shutter speeds are shown the way a photographer reads them — `20"`, `1/60`,
+`1/4000`. The dropdown is built from the camera's own list every time it
+connects, so it only ever offers speeds your body actually has; the labels are
+cosmetic and the camera's own value is what gets sent back.
 
 During a long exposure the status line counts the frame down (`exposing · 183s
 left`), so a four-minute bulb frame never looks like a hang.
@@ -311,11 +313,17 @@ because values are matched by meaning:
 ```yaml
 set: {shutterspeed: "20"}      # matches the camera's 20.0000s
 set: {shutterspeed: "1/60"}    # matches 0.0166s
+set: {shutterspeed: "1/4000"}  # matches 0.0002s
 set: {shutterspeed: "Bulb"}    # case-insensitive
 ```
 
-A value only matches within 1%, so a typo is never silently rounded to a different
-exposure — you get `no setting equal to '22'. Closest is '20.0000s'.` instead.
+Cameras truncate these decimals to four places, so `1/4000` — really 0.00025 s —
+arrives as `0.0002s`. NightShoot applies the same truncation to whatever you
+write before comparing, which resolves that exactly rather than guessing at the
+nearest value.
+
+Otherwise a value only matches within 1%, so a typo is never silently rounded to a
+different exposure — you get `no setting equal to '22'. Closest is '20.0000s'.`
 
 Before a script starts, every setting it will apply is checked against the camera,
 so a bad value is reported immediately rather than arming the sequence and
