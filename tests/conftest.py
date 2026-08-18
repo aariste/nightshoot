@@ -67,12 +67,17 @@ class FakeCameraState:
         }
         self.readonly = set()
         self.counter = 0
-        self.calls = {"config": 0, "preview": 0, "capture": 0, "storage": 0}
-        self.cost = {"config": 0.0, "preview": 0.0, "capture": 0.0}
+        self.calls = {"config": 0, "preview": 0, "capture": 0, "storage": 0, "trigger": 0}
+        # Modelled on a real Z50 over USB 2: a synchronous capture waits for the
+        # file, a trigger does not.
+        self.cost = {"config": 0.0, "preview": 0.0, "capture": 0.0, "trigger": 0.0}
         self.fail_captures = 0
         self.preview_fails = False
         self.storage_supported = True
         self.free_images = 1180
+        self.supports_trigger = True
+        self.pending_files = []      # fired but not yet reported as written
+        self.buffer_limit = 0        # 0 = unlimited; else error when full
 
 
 STATE = FakeCameraState()
@@ -94,6 +99,11 @@ def _build_module() -> types.ModuleType:
 
     gp.GPhoto2Error = GPhoto2Error
 
+    class CameraFilePath:
+        def __init__(self, name):
+            self.folder = "/store_00010001/DCIM/100NZ_50"
+            self.name = name
+
     class Widget:
         def __init__(self, name):
             self._name = name
@@ -109,6 +119,12 @@ def _build_module() -> types.ModuleType:
 
         def set_value(self, value):
             STATE.values[self._name] = value
+            # Closing the bulb shutter makes the camera write a file, exactly
+            # as the real one does.
+            if self._name == "bulb" and not value:
+                STATE.counter += 1
+                STATE.pending_files.append(
+                    CameraFilePath(f"DSC_{STATE.counter:04d}.NEF"))
 
         def get_readonly(self):
             return self._name in STATE.readonly
@@ -131,11 +147,6 @@ def _build_module() -> types.ModuleType:
             if name not in STATE.values:
                 raise GPhoto2Error(-1, f"no widget named {name}")
             return Widget(name)
-
-    class CameraFilePath:
-        def __init__(self, name):
-            self.folder = "/store_00010001/DCIM/100NZ_50"
-            self.name = name
 
     class CameraFile:
         def __init__(self, data=b"\xff\xd8fake-jpeg\xff\xd9"):
@@ -183,7 +194,21 @@ def _build_module() -> types.ModuleType:
             return CameraFilePath(f"DSC_{STATE.counter:04d}.NEF")
 
         def wait_for_event(self, timeout_ms):
+            # Files fired by trigger_capture surface here, as on a real camera.
+            if STATE.pending_files:
+                return (gp.GP_EVENT_FILE_ADDED, STATE.pending_files.pop(0))
+            _time.sleep(min(timeout_ms, 5) / 1000.0)
             return (gp.GP_EVENT_TIMEOUT, None)
+
+        def trigger_capture(self):
+            if not STATE.supports_trigger:
+                raise GPhoto2Error(-1, "trigger not supported")
+            if STATE.buffer_limit and len(STATE.pending_files) >= STATE.buffer_limit:
+                raise GPhoto2Error(-1, "camera buffer full")
+            STATE.calls["trigger"] += 1
+            _time.sleep(STATE.cost["trigger"])
+            STATE.counter += 1
+            STATE.pending_files.append(CameraFilePath(f"DSC_{STATE.counter:04d}.NEF"))
 
         def file_get(self, folder, name, file_type):
             STATE.calls["preview"] += 1

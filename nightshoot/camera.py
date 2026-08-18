@@ -159,6 +159,7 @@ class Camera:
         self._storage_cache: dict | None = None
         self._storage_at = 0.0
         self._snapshot_cache: dict | None = None
+        self._can_trigger: bool | None = None
         self._shutter_s: float | None = None
         self._shutter_at = 0.0
         # Fetching a preview JPEG costs far more than a fast frame does. At high
@@ -500,6 +501,46 @@ class Camera:
             if download and self.download_dir:
                 shot.saved_path = self._download(path)
             return shot
+
+    def supports_trigger(self) -> bool:
+        """Can this body fire the shutter without waiting for the file?"""
+        if self._can_trigger is None:
+            self._can_trigger = hasattr(self._cam, "trigger_capture")
+        return bool(self._can_trigger)
+
+    def trigger(self) -> None:
+        """Fire the shutter and return immediately.
+
+        ``capture()`` is synchronous: it waits for the exposure *and* for the
+        camera to make the file available, which is a full PTP round trip per
+        frame. For bursts we only need the shutter to fire; files are collected
+        afterwards from the event queue.
+        """
+        with self._lock:
+            cam = self._require()
+            try:
+                cam.trigger_capture()
+            except gp.GPhoto2Error as exc:
+                self._reconnect_if_fatal(exc)
+                raise CameraError(f"trigger failed: {exc}") from exc
+
+    def collect_new_files(self, timeout_ms: int = 1) -> list:
+        """Drain any files the camera has finished writing. Never blocks long."""
+        found = []
+        if self._cam is None or not self._lock.acquire(timeout=0.2):
+            return found
+        try:
+            while True:
+                try:
+                    etype, data = self._cam.wait_for_event(timeout_ms)
+                except gp.GPhoto2Error:
+                    return found
+                if etype == gp.GP_EVENT_FILE_ADDED:
+                    found.append(data)
+                    continue
+                return found
+        finally:
+            self._lock.release()
 
     def _capture_bulb(self, seconds: float):
         """Nikon bulb: toggle the 'bulb' action, then collect the new file."""

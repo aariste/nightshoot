@@ -366,12 +366,25 @@ lightning or anything that will not wait. The status panel shows the measured
 **per frame** time and frames per second, which is the honest answer to how fast
 your body actually goes.
 
-NightShoot keeps its own per-frame overhead out of the way: the shutter speed is
-read from a short-lived cache rather than re-queried every frame, and preview
-thumbnails are fetched at most every 1.5 s instead of once per shot. Both are USB
-round trips that cost far more than a 1/2000 exposure.
+With interval `0`, no bulb and no downloading, NightShoot switches to a **burst
+path** that fires the shutter with libgphoto2's `trigger_capture` and collects
+the files from the camera's event queue afterwards, rather than waiting for each
+file to be written before firing again. That removes a full PTP round trip per
+frame. The frame counter stays accurate — files are counted as the camera
+reports them, and the last few are drained after the final trigger.
 
-What remains is the camera, and that is where the real limit is:
+NightShoot also keeps its own overhead out of the way: the shutter speed is read
+from a short-lived cache rather than re-queried every frame, and preview
+thumbnails are skipped entirely during a burst.
+
+**It will still not match holding the shutter button down.** That is a protocol
+limit, not a tuning problem. The camera's continuous-release drive mode runs
+entirely inside the camera; remote capture goes over USB PTP, which is
+request/response and is not exposed to the body's burst machinery
+([libgphoto2#968](https://github.com/gphoto/libgphoto2/issues/968)). Expect a few
+frames per second at best, against 11 fps for the Z50's own burst.
+
+What actually moves the needle after that is the camera:
 
 | Setting | Effect on burst rate |
 |---|---|
@@ -381,10 +394,9 @@ What remains is the camera, and that is where the real limit is:
 | **High ISO NR off or low** | In-camera processing delays the next frame. |
 | **Manual focus** | No AF hunt between frames. |
 
-Even set up well, tethered PTP capture is not the same as the camera's own
-continuous-release burst — expect a few frames per second, not eleven. If you
-need the camera's true burst rate, use its own drive mode; NightShoot is for
-unattended sequences.
+If you need the camera's true burst rate, use its own drive mode and pull the
+files off the card afterwards. NightShoot is for unattended sequences, and no
+gphoto2-based tool can beat this limit.
 
 The shipped `fast-burst.yaml` example is set up along these lines.
 

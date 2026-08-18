@@ -25,6 +25,20 @@ class Stopped(Exception):
     """Raised inside a worker when the user asks it to stop."""
 
 
+class _TriggeredShot:
+    """A frame fired in burst mode, where no preview is fetched per shot."""
+
+    __slots__ = ("folder", "name", "started_at", "exposure_s", "saved_path", "thumb_path")
+
+    def __init__(self, path):
+        self.folder = getattr(path, "folder", "")
+        self.name = getattr(path, "name", "frame")
+        self.started_at = time.time()
+        self.exposure_s = 0.0
+        self.saved_path = None
+        self.thumb_path = None
+
+
 @dataclass
 class Plan:
     frames: int = 100          # 0 == run until stopped or until_ts
@@ -289,6 +303,57 @@ class Sequencer:
         total = self.frames_total or "?"
         self._say(f"frame {done}/{total}: {shot.name}")
 
+    # --------------------------------------------------------------- burst job
+
+    def _run_burst(self, plan: Plan) -> None:
+        """Fire the shutter without waiting for each file to be written.
+
+        The camera's own buffer becomes the limit rather than the PTP round
+        trip. Files are collected from the event queue as they appear, so the
+        frame count stays honest.
+        """
+        self._say("burst mode: firing without waiting for each file")
+        self._set_state("exposing")
+        consecutive = 0
+        fired = 0
+
+        while not self._stop.is_set():
+            if plan.frames and fired >= plan.frames:
+                break
+            if plan.until_ts and time.time() >= plan.until_ts:
+                break
+            if self._pause.is_set():
+                self._set_state("paused")
+                time.sleep(0.2)
+                self._set_state("exposing")
+                continue
+
+            try:
+                self.camera.trigger()
+                fired += 1
+                consecutive = 0
+            except CameraError as exc:
+                consecutive += 1
+                if not self._note_error(exc, consecutive, plan.max_consecutive_errors):
+                    self._set_state("error")
+                    return self._finish("aborted after repeated capture errors", ok=False)
+                # A full buffer shows up as an error; easing off lets it drain.
+                if not self._sleep_until(time.time() + min(5.0, 0.5 * consecutive)):
+                    return self._finish("stopped during error backoff")
+
+            for path in self.camera.collect_new_files():
+                self._record(_TriggeredShot(path))
+
+        # The last few frames are still being written when the loop ends.
+        deadline = time.time() + 20.0
+        while self.frames_done < fired and time.time() < deadline:
+            for path in self.camera.collect_new_files(timeout_ms=200):
+                self._record(_TriggeredShot(path))
+            if self._stop.is_set() and time.time() > deadline - 15.0:
+                break
+
+        self._finish("burst complete" if not self._stop.is_set() else "stopped by user")
+
     def _note_error(self, exc: Exception, consecutive: int, limit: int) -> bool:
         """Record a capture failure. False means give up."""
         with self._lock:
@@ -314,6 +379,13 @@ class Sequencer:
             self._say(f"starting in {plan.start_delay_s:.0f}s (let vibrations settle)")
             if not self._sleep_until(time.time() + plan.start_delay_s):
                 return self._finish("stopped before first frame")
+
+        # With no interval and nothing to download, the shutter can be fired
+        # without waiting for each file — noticeably faster than a synchronous
+        # capture per frame.
+        if plan.interval_s == 0 and not plan.bulb and not plan.download \
+                and self.camera.supports_trigger():
+            return self._run_burst(plan)
 
         consecutive = 0
         while not self._stop.is_set():

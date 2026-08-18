@@ -13,3 +13,7 @@ steps:
   - repeat: 30
     steps:
       - capture:
+
+# Interval 0 in the Sequence panel is faster still: it fires the shutter without
+# waiting for each file. A script's captures are sequential by design, because a
+# script may need each frame to complete before changing a setting.
