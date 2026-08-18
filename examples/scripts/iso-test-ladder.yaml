@@ -1,0 +1,19 @@
+name: ISO test ladder
+description: >
+  One frame at each ISO, twice, so you can compare noise on your own body before
+  committing to a long night. Takes about two minutes. Run this once at home.
+
+steps:
+  - set:
+      imageformat: "NEF (Raw)"
+      shutterspeed: "20"
+  - repeat: 2
+    steps:
+      - message: "ISO pass {{i}}"
+      - for_each:
+          setting: iso
+          values: ["400", "800", "1600", "3200", "6400"]
+        steps:
+          - message: "shooting ISO {{value}}"
+          - capture:
+          - wait: 3

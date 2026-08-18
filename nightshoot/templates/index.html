@@ -1,0 +1,952 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<title>NightShoot</title>
+<style>
+  /* Night (default): deep red on black, preserves dark adaptation.
+     Day: high-contrast light theme that stays readable in sunlight. */
+  :root, :root.night {
+    --bg:#000; --panel:#0a0000; --fg:#ff4438; --dim:#8c1f18; --line:#2a0d0b;
+    --value:#ffb3ad; --warn:#ffd34d; --danger:#ff4438; --btn:#140000; --invert:#000;
+    --shade:saturate(.25);
+  }
+  :root.day {
+    --bg:#eef1f5; --panel:#fff; --fg:#10151c; --dim:#5b6675; --line:#c3cbd6;
+    --value:#0b3d91; --warn:#8a5300; --danger:#b3261e; --btn:#fff; --invert:#fff;
+    --shade:none;
+  }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { margin:0; padding:14px 14px 40px; background:var(--bg); color:var(--fg);
+         font:16px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+         transition:background .2s, color .2s; }
+  body.stale section, body.stale h1 { opacity:.45; }
+
+  h1 { font-size:18px; letter-spacing:3px; margin:0 0 12px;
+       display:flex; align-items:center; gap:10px; }
+  h1 .spacer { flex:1; }
+  h1 small { color:var(--dim); letter-spacing:0; font-weight:400; font-size:13px; }
+  #themebtn { width:auto; margin:0; padding:12px 14px; font-size:17px; line-height:1;
+              border-radius:8px; border:1px solid var(--line); background:var(--panel);
+              letter-spacing:0; }
+  #themebtn:active { background:var(--fg); color:var(--invert); }
+
+  section { border:1px solid var(--line); border-radius:10px; padding:12px; margin-bottom:12px;
+            background:var(--panel); }
+  h2 { font-size:12px; letter-spacing:2px; color:var(--dim); margin:0 0 10px; text-transform:uppercase; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  label { display:block; font-size:11px; color:var(--dim); letter-spacing:1px; margin-bottom:3px; }
+  input, select { width:100%; background:var(--bg); color:var(--fg); border:1px solid var(--line);
+                  border-radius:8px; padding:11px 9px; font:inherit; font-size:16px; }
+  input:focus, select:focus { outline:2px solid var(--fg); outline-offset:-2px; border-color:var(--fg); }
+  input:disabled, select:disabled { opacity:.4; }
+
+  /* 15px padding keeps every control above the ~44px minimum tap target. */
+  button { width:100%; background:var(--btn); color:var(--fg); border:1px solid var(--fg);
+           border-radius:10px; padding:15px; font:inherit; font-weight:700; letter-spacing:2px;
+           margin-top:8px; cursor:pointer; }
+  button:active { background:var(--fg); color:var(--invert); }
+  button[disabled] { opacity:.3; border-color:var(--dim); cursor:default; }
+  button.ghost { border-color:var(--line); color:var(--dim); font-weight:400; letter-spacing:1px; }
+  button.danger { border-color:var(--danger); color:var(--danger); }
+  button.danger:active { background:var(--danger); color:var(--invert); }
+  .row { display:flex; gap:8px; }
+
+  .kv { display:flex; justify-content:space-between; gap:10px;
+        border-bottom:1px dotted var(--line); padding:5px 0; font-size:14px; }
+  .kv span:last-child { color:var(--value); text-align:right; }
+  .big { font-size:40px; font-weight:700; text-align:center; letter-spacing:2px; margin:6px 0 2px; }
+  .state { text-align:center; letter-spacing:4px; font-size:13px; color:var(--dim);
+           text-transform:uppercase; word-break:break-word; }
+  .bar { height:5px; background:var(--line); border-radius:3px; overflow:hidden; margin:12px 0 4px; }
+  .bar > i { display:block; height:100%; background:var(--fg); width:0; transition:width .4s; }
+  /* Unlimited runs have no percentage, so show motion instead of a fake bar. */
+  .bar.indeterminate > i { width:35% !important; animation:slide 1.6s ease-in-out infinite; }
+  @keyframes slide { 0%{margin-left:-35%} 100%{margin-left:100%} }
+
+  pre { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:9px;
+        font-size:11px; max-height:190px; overflow:auto; margin:0; white-space:pre-wrap; }
+  img#thumb, img  .adder { border-top:1px solid var(--line); margin-top:12px; padding-top:8px; }
+  textarea { width:100%; background:var(--bg); color:var(--fg); border:1px solid var(--line);
+             border-radius:8px; padding:10px 9px; font:inherit; font-size:14px;
+             line-height:1.4; resize:vertical; white-space:pre; overflow-wrap:normal;
+             overflow-x:auto; }
+  textarea:focus { outline:2px solid var(--fg); outline-offset:-2px; }
+  #lvimg { width:100%; border-radius:8px; border:1px solid var(--line); display:none; }
+  img#thumb { filter:var(--shade); }
+  .warn { color:var(--warn); font-size:12px; margin-top:8px; }
+  .warn:empty { display:none; }
+  .hint { color:var(--dim); font-size:12px; margin-top:6px; }
+  .off { color:var(--dim); }
+
+  /* Collapsible panels. <details> works even before the JS runs. */
+  details > summary { font-size:12px; letter-spacing:2px; color:var(--dim);
+      text-transform:uppercase; cursor:pointer; list-style:none; user-select:none;
+      display:flex; align-items:center; gap:8px; padding:2px 0; }
+  details > summary::-webkit-details-marker { display:none; }
+  details > summary::before { content:'▸'; font-size:11px; transition:transform .15s; }
+  details[open] > summary::before { transform:rotate(90deg); }
+  details > summary .tag { margin-left:auto; text-transform:none; letter-spacing:0;
+      font-size:11px; color:var(--dim); overflow:hidden; text-overflow:ellipsis;
+      white-space:nowrap; max-width:55%; }
+  details > .body { margin-top:10px; }
+
+  /* Always-reachable run controls: the one thing you must be able to hit
+     instantly in the dark, without scrolling back up. */
+  #runbar { display:none; position:sticky; top:0; z-index:10; margin:-14px -14px 12px;
+            padding:10px 14px; background:var(--panel);
+            border-bottom:1px solid var(--line); align-items:center; gap:10px; }
+  #runbar.on { display:flex; }
+  #runbar .rb-text { flex:1; min-width:0; }
+  #runbar .rb-state { font-size:11px; letter-spacing:2px; color:var(--dim); text-transform:uppercase; }
+  #runbar .rb-count { font-size:17px; font-weight:700; }
+  #runbar button { width:auto; margin:0; padding:12px 14px; letter-spacing:1px; font-size:13px; }
+
+  #toast { position:fixed; left:12px; right:12px; bottom:12px; z-index:20;
+           background:var(--panel); border:1px solid var(--fg); color:var(--fg);
+           border-radius:10px; padding:13px 14px; font-size:14px; display:none;
+           box-shadow:0 4px 18px rgba(0,0,0,.5); }
+  #toast.on { display:block; }
+  #toast.err { border-color:var(--danger); color:var(--danger); }
+</style>
+<script>
+  // Runs during head parsing, before first paint, so there is no theme flash.
+  (function () {
+    var saved;
+    try { saved = localStorage.getItem('nightshoot.theme'); } catch (e) {}
+    document.documentElement.className = (saved === 'day') ? 'day' : 'night';
+  })();
+</script>
+</head>
+<body>
+
+<div id="runbar" role="status">
+  <div class="rb-text">
+    <div class="rb-state" id="rbstate">running</div>
+    <div class="rb-count" id="rbcount">0</div>
+  </div>
+  <button class="ghost" id="rbpause" onclick="togglePause()">PAUSE</button>
+  <button class="danger" id="rbstop" onclick="stopRun()">STOP</button>
+</div>
+
+<h1>NIGHTSHOOT
+  <span class="spacer"></span>
+  <small id="clock">--:--:--</small>
+  <button id="themebtn" onclick="toggleTheme()" title="Toggle night/day mode"
+          aria-label="Toggle night or day mode">☾</button>
+</h1>
+
+<section>
+  <h2>Status</h2>
+  <div class="big" id="counter">—</div>
+  <div class="state" id="state">connecting…</div>
+  <div class="bar" id="progwrap"><i id="prog"></i></div>
+  <div class="kv"><span>next frame</span><span id="next">—</span></div>
+  <div class="kv"><span>per frame</span><span id="cycle">—</span></div>
+  <div class="kv"><span>elapsed</span><span id="elapsed">—</span></div>
+  <div class="kv"><span>finishes</span><span id="eta">—</span></div>
+  <div class="kv"><span>camera</span><span id="model">—</span></div>
+  <div class="kv"><span>battery</span><span id="batt">—</span></div>
+  <div class="kv"><span>card free</span><span id="card">—</span></div>
+  <div class="kv" id="diskrow"><span>pi disk free</span><span id="disk">—</span></div>
+  <div class="warn" id="warn"></div>
+</section>
+
+<section>
+  <h2>Camera</h2>
+  <div class="grid">
+    <div><label for="shutterspeed">SHUTTER</label><select id="shutterspeed"></select></div>
+    <div><label for="iso">ISO</label><select id="iso"></select></div>
+    <div><label for="aperture">APERTURE</label><select id="aperture"></select></div>
+    <div><label for="imageformat">FORMAT</label><select id="imageformat"></select></div>
+  </div>
+  <button class="ghost" id="applybtn" onclick="applySettings()">APPLY TO CAMERA</button>
+  <div class="row">
+    <button class="ghost" onclick="reconnect()">RECONNECT</button>
+    <button class="ghost" id="testbtn" onclick="testShot()">TEST FRAME</button>
+  </div>
+</section>
+
+<section>
+  <details id="lvpanel">
+    <summary>Live view <span class="tag" id="lvtag">off</span></summary>
+    <div class="body">
+      <div class="hint">For framing and focus. Unavailable while a sequence runs —
+        the sensor cannot stream and expose at the same time.</div>
+      <div class="grid">
+        <div><label for="lvon">STREAM</label>
+          <select id="lvon" onchange="setLiveview()">
+            <option value="0">off</option><option value="1">on</option>
+          </select></div>
+        <div><label for="lvrate">REFRESH</label>
+          <select id="lvrate" onchange="rateChanged()">
+            <option value="500">2 fps</option>
+            <option value="1000" selected>1 fps</option>
+            <option value="3000">every 3 s</option>
+          </select></div>
+      </div>
+      <img id="lvimg" alt="Live view from the camera">
+      <div class="warn" id="lverr"></div>
+    </div>
+  </details>
+</section>
+
+<section>
+  <h2>Sequence</h2>
+  <div class="grid">
+    <div><label for="frames">FRAMES (0 = ∞)</label>
+      <input id="frames" type="number" inputmode="numeric" min="0" value="200"></div>
+    <div><label for="interval_s">INTERVAL (s, 0 = fastest)</label>
+      <input id="interval_s" type="number" inputmode="decimal" min="0" step="0.5" value="25"></div>
+    <div><label for="start_delay_s">START DELAY (s)</label>
+      <input id="start_delay_s" type="number" inputmode="numeric" min="0" value="10"></div>
+    <div><label for="until">STOP AT (local)</label>
+      <input id="until" type="time"></div>
+  </div>
+  <div class="grid" style="margin-top:8px">
+    <div><label for="bulb">BULB MODE</label>
+      <select id="bulb" onchange="bulbChanged()">
+        <option value="0">off — use camera shutter</option>
+        <option value="1">on — Pi times exposure</option>
+      </select></div>
+    <div><label for="exposure_s">BULB EXPOSURE (s)</label>
+      <input id="exposure_s" type="number" inputmode="numeric" min="1" value="60" disabled></div>
+  </div>
+  <div style="margin-top:8px"><label for="download">COPY FILES TO PI</label>
+    <select id="download">
+      <option value="0">no — keep on camera card</option>
+      <option value="1">yes — also download</option>
+    </select></div>
+  <div class="hint" id="plansummary"></div>
+  <button id="go" onclick="start()">START</button>
+</section>
+
+<section>
+  <details id="scriptpanel" open>
+    <summary>Scripts <span class="tag" id="scripttag"></span></summary>
+    <div class="body">
+      <label for="scriptsel">PRE-UPLOADED SCRIPT</label>
+      <select id="scriptsel" onchange="scriptPicked()"><option value="">— none —</option></select>
+      <div class="kv"><span>frames</span><span id="scriptframes">—</span></div>
+      <div class="hint" id="scriptdesc"></div>
+      <div class="warn" id="scripterr"></div>
+      <button id="runscript" onclick="runScript()">RUN SCRIPT</button>
+      <div class="row">
+        <button class="ghost" onclick="loadScripts(true)">RELOAD LIST</button>
+        <button class="ghost" id="srcbtn" onclick="toggleSource()">VIEW SOURCE</button>
+      </div>
+      <pre id="scriptsrc" style="display:none"></pre>
+
+      <div class="adder">
+        <input type="file" id="scriptfile" accept=".yaml,.yml,text/yaml,text/plain"
+               multiple onchange="uploadFiles(this.files)" hidden>
+        <div class="row">
+          <button class="ghost" onclick="document.getElementById('scriptfile').click()">
+            UPLOAD FILE</button>
+          <button class="ghost" id="pastebtn" onclick="togglePaste()">PASTE NEW</button>
+        </div>
+        <div id="pastebox" style="display:none">
+          <label for="pastename">FILE NAME</label>
+          <input id="pastename" type="text" placeholder="my-sequence.yaml"
+                 autocapitalize="off" autocorrect="off" spellcheck="false">
+          <label for="pastetext" style="margin-top:8px">SCRIPT</label>
+          <textarea id="pastetext" rows="10" spellcheck="false" autocapitalize="off"
+                    autocorrect="off" placeholder="name: My sequence&#10;steps:&#10;  - capture:"></textarea>
+          <button class="ghost" onclick="uploadPasted()">SAVE SCRIPT</button>
+        </div>
+        <div class="warn" id="uploaderr"></div>
+      </div>
+    </div>
+  </details>
+</section>
+
+<section>
+  <details id="lastpanel" open>
+    <summary>Last frame <span class="tag" id="lasttag"></span></summary>
+    <div class="body">
+      <a id="thumblink" href="/thumb.jpg" target="_blank" rel="noopener">
+        <img id="thumb" alt="Preview of the most recent frame"></a>
+      <div class="hint" id="nothumb">No frame yet. Use <b>Test frame</b> to check focus.</div>
+      <div class="kv"><span>file</span><span id="lastname">—</span></div>
+    </div>
+  </details>
+</section>
+
+<section>
+  <details id="logpanel">
+    <summary>Log <span class="tag" id="logtag"></span></summary>
+    <div class="body"><pre id="log">waiting…</pre></div>
+  </details>
+</section>
+
+<section>
+  <details id="adminpanel">
+    <summary>Admin <span class="tag" id="admintag"></span></summary>
+    <div class="body">
+      <div class="kv"><span>mode</span><span id="netmode">—</span></div>
+      <div class="kv"><span>network</span><span id="netname">—</span></div>
+      <div class="kv"><span>pi address</span><span id="netaddr">—</span></div>
+      <div class="kv" id="apinforow"><span>hotspot ssid</span><span id="apssid">—</span></div>
+      <div class="kv" id="appassrow"><span>hotspot password</span><span id="appass">—</span></div>
+
+      <div class="warn" id="netwarn"></div>
+
+      <div style="margin-top:10px"><label for="revertsel">SAFETY NET</label>
+        <select id="revertsel">
+          <option value="600">revert after 10 min if unreachable</option>
+          <option value="300">revert after 5 min</option>
+          <option value="1800">revert after 30 min</option>
+          <option value="0">no revert — keep the hotspot on</option>
+        </select></div>
+
+      <button id="apbtn" onclick="toggleHotspot()">TURN HOTSPOT ON</button>
+      <button class="ghost" id="cancelrevert" onclick="cancelRevert()"
+              style="display:none">CANCEL SCHEDULED REVERT</button>
+      <div class="hint" id="nethint"></div>
+    </div>
+  </details>
+</section>
+
+<section>
+  <details id="syspanel">
+    <summary>System</summary>
+    <div class="body">
+      <div class="hint">Always shut down before pulling power — an interrupted
+        write can corrupt the SD card.</div>
+      <button class="danger" onclick="shutdown()">SHUT DOWN PI</button>
+    </div>
+  </details>
+</section>
+
+<div id="toast" role="alert" aria-live="assertive"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const SETTINGS = ['shutterspeed','iso','aperture','imageformat'];
+const PANELS = ['lvpanel','scriptpanel','lastpanel','logpanel','adminpanel','syspanel'];
+
+let paused = false, choicesLoaded = false, thumbStamp = 0;
+let dirty = new Set(), scriptIndex = {}, lvTimer = null;
+let wasReachable = true, wakeLock = null, lastSeq = {}, cardFreeImages = null, netTick = 0;
+
+// --- theme -----------------------------------------------------------------
+// Stored per device, so it survives reloads, browser restarts and Pi reboots.
+function applyTheme(mode) {
+  document.documentElement.className = mode;
+  try { localStorage.setItem('nightshoot.theme', mode); } catch (e) {}
+  $('themebtn').textContent = mode === 'day' ? '☀' : '☾';
+  const meta = document.querySelector('meta[name=theme-color]');
+  if (meta) meta.content = mode === 'day' ? '#eef1f5' : '#000000';
+}
+function toggleTheme() {
+  applyTheme(document.documentElement.classList.contains('day') ? 'night' : 'day');
+}
+applyTheme(document.documentElement.classList.contains('day') ? 'day' : 'night');
+
+// --- notices ---------------------------------------------------------------
+// A toast instead of alert(): non-blocking, and it never paints a bright white
+// system dialog over a dark-adapted eye.
+let toastTimer = null;
+function toast(message, isError) {
+  const el = $('toast');
+  el.textContent = message;
+  el.className = 'on' + (isError ? ' err' : '');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.className = ''; }, isError ? 6000 : 3000);
+}
+
+// --- helpers ---------------------------------------------------------------
+function hms(s) {
+  if (s === null || s === undefined) return '—';
+  s = Math.max(0, Math.round(s));
+  const h = String(Math.floor(s/3600)).padStart(2,'0');
+  const m = String(Math.floor(s%3600/60)).padStart(2,'0');
+  return `${h}:${m}:${String(s%60).padStart(2,'0')}`;
+}
+function clock(ts) {
+  return ts ? new Date(ts*1000).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '—';
+}
+
+// Cameras report shutter speeds in their own dialect — a Z50 says '0.0166s' and
+// '20.0000s'. Photographers read 1/60 and 20". Format for the eye, keep the
+// camera's own string as the value we send back.
+function shutterLabel(raw) {
+  const m = /^([0-9]*\.?[0-9]+)\s*s?$/i.exec(String(raw).trim());
+  if (!m) return raw;                       // 'Bulb', 'Time', 1/60 style, etc.
+  const s = parseFloat(m[1]);
+  if (!isFinite(s) || s <= 0) return raw;
+  if (s >= 1) {
+    const shown = Number.isInteger(s) ? s : parseFloat(s.toFixed(1));
+    return shown + '"';                     // 20"
+  }
+  const d = 1 / s;
+  // Snap to the fraction photographers expect (1/8000 … 1/2).
+  const common = [2,3,4,5,6,8,10,13,15,20,25,30,40,50,60,80,100,125,160,200,250,
+                  320,400,500,640,800,1000,1250,1600,2000,2500,3200,4000,5000,6400,8000];
+  let best = common[0];
+  for (const c of common) if (Math.abs(c - d) < Math.abs(best - d)) best = c;
+  return (Math.abs(best - d) / d <= 0.05) ? '1/' + best : '1/' + Math.round(d);
+}
+function labelFor(key, raw) { return key === 'shutterspeed' ? shutterLabel(raw) : raw; }
+async function post(url, body) {
+  let j = {};
+  try {
+    const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'},
+                                body: JSON.stringify(body || {})});
+    j = await r.json().catch(() => ({}));
+  } catch (e) {
+    toast('No connection to the Pi.', true);
+    return {};
+  }
+  if (j.error) toast(j.error, true);
+  refresh();
+  return j;
+}
+
+// --- collapsible panels ----------------------------------------------------
+function initPanels() {
+  PANELS.forEach(id => {
+    const el = $(id);
+    if (!el) return;
+    let saved = null;
+    try { saved = localStorage.getItem('nightshoot.panel.' + id); } catch (e) {}
+    if (saved !== null) el.open = saved === '1';
+    el.addEventListener('toggle', () => {
+      try { localStorage.setItem('nightshoot.panel.' + id, el.open ? '1' : '0'); } catch (e) {}
+      // Streaming into a collapsed panel would drain the camera battery unseen.
+      if (id === 'lvpanel' && !el.open) { $('lvon').value = '0'; setLiveview(); }
+      if (id === 'adminpanel' && el.open) loadNetwork();
+    });
+  });
+}
+
+// --- camera ----------------------------------------------------------------
+SETTINGS.forEach(k => $(k).addEventListener('change', () => { dirty.add(k); updateApply(); }));
+function updateApply() {
+  $('applybtn').textContent = dirty.size ? `APPLY ${dirty.size} CHANGE(S)` : 'APPLY TO CAMERA';
+}
+async function applySettings() {
+  if (!dirty.size) { toast('Nothing changed.'); return; }
+  const body = {};
+  SETTINGS.forEach(k => { if (dirty.has(k)) body[k] = $(k).value; });
+  dirty.clear(); updateApply();
+  const j = await post('/api/settings', body);
+  const failed = Object.keys(j.failed || {});
+  if (failed.length) toast(failed.map(n => n + ': ' + j.failed[n]).join(' · '), true);
+  else if (j.applied) toast('Applied ' + j.applied.length + ' setting(s).');
+}
+async function reconnect() {
+  toast('Reconnecting…');
+  const j = await post('/api/connect');
+  if (j.ok) { choicesLoaded = false; toast('Camera connected.'); }
+}
+async function testShot() {
+  const btn = $('testbtn');
+  btn.disabled = true; btn.textContent = 'EXPOSING…';
+  const j = await post('/api/test-shot',
+                       {bulb: $('bulb').value === '1', exposure_s: +$('exposure_s').value});
+  btn.disabled = false; btn.textContent = 'TEST FRAME';
+  if (!j.ok) return;
+  toast('Test frame: ' + j.name);
+  // Test frames are not part of a sequence, so show the result here directly.
+  if (j.has_thumb) showThumb(j.at || Date.now() / 1000, j.name);
+  $('lastpanel').open = true;
+}
+function showThumb(stamp, name) {
+  if (stamp === thumbStamp) return;
+  thumbStamp = stamp;
+  $('thumb').src = '/thumb.jpg?t=' + stamp;
+  $('thumb').style.display = 'block';
+  $('thumblink').href = '/thumb.jpg?t=' + stamp;
+  $('nothumb').style.display = 'none';
+  if (name) { $('lastname').textContent = name; $('lasttag').textContent = name; }
+}
+async function loadChoices() {
+  for (const key of SETTINGS) {
+    const r = await fetch('/api/choices/' + key).then(x => x.json()).catch(() => ({}));
+    const sel = $(key);
+    sel.innerHTML = '';
+    (r.choices || []).forEach(c => sel.add(new Option(labelFor(key, c), c)));
+    if (!r.choices || !r.choices.length) sel.add(new Option('unavailable', ''));
+  }
+  choicesLoaded = true;
+}
+
+// --- live view -------------------------------------------------------------
+async function setLiveview() {
+  const on = $('lvon').value === '1';
+  $('lverr').textContent = '';
+  if (!on) { stopLiveview(); }
+  let j = {};
+  try {
+    const r = await fetch('/api/liveview', {method:'POST',
+        headers:{'Content-Type':'application/json'}, body: JSON.stringify({enabled:on})});
+    j = await r.json().catch(() => ({}));
+  } catch (e) { j = {ok:false, error:'no connection to the Pi'}; }
+  if (!j.ok) {
+    $('lverr').textContent = j.error || 'live view unavailable';
+    $('lvon').value = '0'; stopLiveview(); return;
+  }
+  if (on) startLiveview();
+}
+function rateChanged() { if (lvTimer) startLiveview(); }   // apply without a toggle
+function startLiveview() {
+  stopLiveview();
+  $('lvimg').style.display = 'block';
+  $('lvtag').textContent = 'streaming';
+  const tick = () => {
+    const img = $('lvimg');
+    img.onerror = () => {
+      $('lverr').textContent = 'live view stopped (camera busy?)';
+      $('lvon').value = '0'; stopLiveview();
+    };
+    img.src = '/preview.jpg?t=' + Date.now();
+  };
+  tick();
+  lvTimer = setInterval(tick, +$('lvrate').value);
+}
+function stopLiveview() {
+  if (lvTimer) { clearInterval(lvTimer); lvTimer = null; }
+  $('lvimg').style.display = 'none';
+  $('lvtag').textContent = 'off';
+}
+
+// --- sequence --------------------------------------------------------------
+function bulbChanged() {
+  const on = $('bulb').value === '1';
+  $('exposure_s').disabled = !on;
+  planSummary();
+}
+function planSummary() {
+  const frames = +$('frames').value, interval = +$('interval_s').value;
+  const bulb = $('bulb').value === '1', exposure = +$('exposure_s').value;
+  const problems = [];
+  if (interval < 0) problems.push('interval cannot be negative');
+  if (bulb && !interval) problems.push('bulb frames need an interval longer than the exposure');
+  else if (bulb && interval <= exposure)
+    problems.push(`interval must exceed the ${exposure}s exposure`);
+  if (problems.length) { $('plansummary').textContent = '⚠ ' + problems.join('; '); return false; }
+
+  const room = cardFreeImages;
+  // With no interval the pace is whatever the camera manages, so predicting a
+  // finish time would be a guess. Show the measured rate instead once running.
+  if (!interval) {
+    const rate = lastSeq.last_cycle_s
+      ? ` Currently about ${lastSeq.last_cycle_s}s per frame.` : '';
+    $('plansummary').textContent =
+      (frames ? `${frames} frames` : 'Unlimited') +
+      ' as fast as the camera allows.' + rate;
+    return true;
+  }
+  if (!frames) {
+    $('plansummary').textContent = 'Runs until you stop it' +
+      ($('until').value ? ' or ' + $('until').value + '.' : '.') +
+      (room ? ` Card holds about ${room} more frames.` : '');
+    return true;
+  }
+  const total = frames * interval + (+$('start_delay_s').value || 0);
+  const ends = new Date(Date.now() + total * 1000);
+  let text = `${frames} frames · ${hms(total)} · ends about ` +
+             ends.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+  if (room && frames > room) text += ` · ⚠ card only holds about ${room}`;
+  $('plansummary').textContent = text;
+  return true;
+}
+['frames','interval_s','start_delay_s','exposure_s','until']
+  .forEach(id => $(id).addEventListener('input', planSummary));
+$('download').addEventListener('change', () => { planSummary(); refresh(); });
+
+function start() {
+  if (!planSummary()) { toast('Fix the highlighted problem first.', true); return; }
+  post('/api/start', {
+    frames: +$('frames').value,
+    interval_s: +$('interval_s').value,
+    start_delay_s: +$('start_delay_s').value,
+    exposure_s: +$('exposure_s').value,
+    bulb: $('bulb').value === '1',
+    download: $('download').value === '1',
+    until: $('until').value || null
+  });
+}
+function togglePause() { post(paused ? '/api/resume' : '/api/pause'); }
+function stopRun() {
+  // One mis-tap should not silently end a four-hour run.
+  const done = lastSeq.frames_done || 0;
+  if (done > 0 && !confirm(`Stop now? ${done} frame(s) captured so far.`)) return;
+  post('/api/stop');
+}
+function shutdown() {
+  if (lastSeq.running && !confirm('A sequence is still running. Shut down anyway?')) return;
+  if (!confirm('Shut down the Pi? The web UI will stop responding.')) return;
+  post('/api/shutdown');
+  toast('Shutting down. Wait for the green LED to stop before pulling power.');
+}
+
+// --- scripts ---------------------------------------------------------------
+async function loadScripts(announce) {
+  let d;
+  try { d = await fetch('/api/scripts').then(r => r.json()); }
+  catch { return; }
+  const sel = $('scriptsel'), previous = sel.value;
+  scriptIndex = {};
+  sel.innerHTML = '';
+  sel.add(new Option('— none —', ''));
+  (d.scripts || []).forEach(s => {
+    scriptIndex[s.filename] = s;
+    sel.add(new Option(s.ok ? s.name : '⚠ ' + s.filename, s.filename));
+  });
+  sel.value = previous in scriptIndex ? previous : '';
+  scriptPicked();
+  if (!(d.scripts || []).length) $('scriptdesc').textContent = 'No scripts found in ' + d.dir;
+  if (announce) toast((d.scripts || []).length + ' script(s) found.');
+}
+function scriptPicked() {
+  const s = scriptIndex[$('scriptsel').value];
+  $('scriptdesc').textContent = s ? (s.description || '') : '';
+  $('scripterr').textContent = s && !s.ok ? s.error : '';
+  $('scriptframes').textContent = !s ? '—'
+    : (s.estimated_frames === null ? 'open-ended' : s.estimated_frames);
+  if ($('scriptsrc').style.display !== 'none') showSource();
+}
+async function showSource() {
+  const name = $('scriptsel').value;
+  if (!name) { $('scriptsrc').textContent = ''; return; }
+  try {
+    const d = await fetch('/api/scripts/' + encodeURIComponent(name)).then(r => r.json());
+    $('scriptsrc').textContent = d.source || d.error || '';
+  } catch (e) { $('scriptsrc').textContent = 'could not load the script'; }
+}
+function toggleSource() {
+  const el = $('scriptsrc');
+  const show = el.style.display === 'none';
+  el.style.display = show ? 'block' : 'none';
+  $('srcbtn').textContent = show ? 'HIDE SOURCE' : 'VIEW SOURCE';
+  if (show) showSource();
+}
+function runScript() {
+  const name = $('scriptsel').value;
+  if (!name) { toast('Pick a script first.', true); return; }
+  const s = scriptIndex[name];
+  if (s && !s.ok) { toast(s.error, true); return; }
+  post('/api/scripts/run', {filename: name});
+}
+
+// --- uploading new scripts --------------------------------------------------
+// A script is validated on the Pi before it is written, so a broken file never
+// reaches the folder and cannot surprise you hours into a night.
+async function sendUpload(payload, isForm) {
+  const opts = isForm
+    ? {method:'POST', body: payload}
+    : {method:'POST', headers:{'Content-Type':'application/json'},
+       body: JSON.stringify(payload)};
+  try {
+    const r = await fetch('/api/scripts/upload', opts);
+    return await r.json().catch(() => ({ok:false, error:'unexpected reply from the Pi'}));
+  } catch (e) {
+    return {ok:false, error:'no connection to the Pi'};
+  }
+}
+function reportUpload(j) {
+  const failed = Object.keys(j.failed || {});
+  if (failed.length) {
+    $('uploaderr').textContent = failed.map(n => n + ': ' + j.failed[n]).join('  ·  ');
+    toast('Rejected: ' + j.failed[failed[0]], true);
+  } else if (j.error) {
+    $('uploaderr').textContent = j.error;
+    toast(j.error, true);
+  } else {
+    $('uploaderr').textContent = '';
+  }
+  if (j.saved && j.saved.length) {
+    toast('Saved ' + j.saved.map(s => s.filename).join(', '));
+    return j.saved[j.saved.length - 1].filename;
+  }
+  return null;
+}
+async function finishUpload(j, retry) {
+  // The Pi refuses to clobber an existing script unless we say so explicitly.
+  if (j.conflicts && j.conflicts.length) {
+    if (confirm(`${j.conflicts.join(', ')} already exists. Replace?`)) {
+      return finishUpload(await retry(true), retry);
+    }
+    $('uploaderr').textContent = 'kept the existing ' + j.conflicts.join(', ');
+    return;
+  }
+  const newest = reportUpload(j);
+  await loadScripts();
+  if (newest) {
+    $('scriptsel').value = newest;
+    scriptPicked();
+    $('pastebox').style.display = 'none';
+    $('pastebtn').textContent = 'PASTE NEW';
+    $('pastetext').value = ''; $('pastename').value = '';
+  }
+}
+async function uploadFiles(files) {
+  if (!files || !files.length) return;
+  $('uploaderr').textContent = '';
+  const send = async (overwrite) => {
+    const fd = new FormData();
+    for (const f of files) fd.append('file', f, f.name);
+    if (overwrite) fd.append('overwrite', '1');
+    return sendUpload(fd, true);
+  };
+  await finishUpload(await send(false), send);
+  $('scriptfile').value = '';        // let the same file be picked again
+}
+function togglePaste() {
+  const box = $('pastebox');
+  const show = box.style.display === 'none';
+  box.style.display = show ? 'block' : 'none';
+  $('pastebtn').textContent = show ? 'CANCEL' : 'PASTE NEW';
+  if (show) $('pastename').focus();
+}
+async function uploadPasted() {
+  const source = $('pastetext').value;
+  const filename = $('pastename').value.trim();
+  if (!source.trim()) { toast('Nothing to save.', true); return; }
+  if (!filename) { toast('Give the script a file name.', true); return; }
+  $('uploaderr').textContent = '';
+  const send = (overwrite) => sendUpload({filename, source, overwrite}, false);
+  await finishUpload(await send(false), send);
+}
+
+// --- admin: wi-fi mode -----------------------------------------------------
+// Every change here cuts the connection this page arrived on, so the UI has to
+// say exactly what will happen and where to reconnect.
+let netState = {};
+async function loadNetwork() {
+  let d;
+  try { d = await fetch('/api/network').then(r => r.json()); }
+  catch { return; }
+  netState = d;
+  if (!d.ok) { $('netwarn').textContent = d.error || 'network status unavailable'; return; }
+
+  const ap = d.hotspot || {};
+  const on = d.mode === 'hotspot';
+  $('netmode').textContent = on ? 'hotspot' : (d.mode === 'wifi' ? 'joined a network' : 'offline');
+  $('netname').textContent = d.connection || '—';
+  $('netaddr').textContent = d.address || '—';
+  $('apssid').textContent = ap.ssid || '—';
+  $('appass').textContent = ap.password || '—';
+  $('admintag').textContent = on ? 'hotspot' : (d.connection || '');
+  $('apbtn').textContent = on ? 'TURN HOTSPOT OFF' : 'TURN HOTSPOT ON';
+  $('apbtn').className = on ? 'danger' : '';
+  $('revertsel').disabled = on;
+  $('cancelrevert').style.display = d.revert_pending ? '' : 'none';
+
+  const notes = [];
+  if (!d.hotspot_configured) notes.push('No hotspot profile on this Pi — run install.sh.');
+  if (d.you_are_on_hotspot && on)
+    notes.push('You are connected over the hotspot. Turning it off will disconnect you.');
+  if (!d.you_are_on_hotspot && !on)
+    notes.push('Turning the hotspot on will drop this connection.');
+  // Matters precisely when the hotspot is up: with nothing to fall back to,
+  // switching off would leave the Pi with no network at all.
+  const stranded = on && !(d.saved_networks || []).length;
+  if (stranded)
+    notes.push('No other saved Wi-Fi, so the hotspot cannot be turned off remotely.');
+  if (d.revert_pending) notes.push('A scheduled revert is armed.');
+  $('netwarn').textContent = notes.join('  ·  ');
+  $('apbtn').disabled = !d.hotspot_configured || stranded;
+
+  $('nethint').textContent = d.sequence_running
+    ? 'A sequence is running. It will keep shooting — capture is over USB, not Wi-Fi.'
+    : '';
+}
+async function toggleHotspot() {
+  const on = netState.mode === 'hotspot';
+  const ap = netState.hotspot || {};
+  const revert = +$('revertsel').value;
+
+  let message;
+  if (on) {
+    message = 'Turn the hotspot OFF and rejoin ' +
+      (netState.saved_networks || []).slice(0, 3).join(' / ') + '?';
+    if (netState.you_are_on_hotspot)
+      message += '\n\nYou are connected THROUGH the hotspot, so this page will stop ' +
+                 'responding. Rejoin your normal Wi-Fi to get back in.';
+  } else {
+    message = `Turn the hotspot ON ("${ap.ssid}")?` +
+      '\n\nThis page will stop responding. Join that network and open ' +
+      `http://${ap.address}:8080` +
+      (revert ? `\n\nIf it does not work, the Pi returns to Wi-Fi after ${Math.round(revert/60)} min.`
+              : '\n\nNo automatic revert is armed.');
+  }
+  if (!confirm(message)) return;
+
+  const j = await postJSON('/api/network/hotspot',
+                           {enabled: !on, revert_after: on ? null : revert});
+  if (!j.ok) { $('netwarn').textContent = j.error || 'could not switch'; toast(j.error, true); return; }
+
+  if (j.switching_to === 'hotspot') {
+    toast(`Switching to "${j.ssid}". Reconnect at http://${j.address}:8080`);
+    $('nethint').textContent =
+      `Join Wi-Fi "${j.ssid}" and open http://${j.address}:8080.` +
+      (j.revert_armed ? ` Reverts in ${Math.round(j.revert_after/60)} min if unused.` : '');
+  } else {
+    toast('Rejoining your normal Wi-Fi. Reconnect at nightshoot.local:8080');
+    $('nethint').textContent = 'Reconnect at http://nightshoot.local:8080';
+  }
+}
+async function cancelRevert() {
+  const j = await postJSON('/api/network/cancel-revert', {});
+  if (j.ok) { toast('Scheduled revert cancelled.'); await loadNetwork(); }
+  else toast(j.error || 'could not cancel', true);
+}
+async function postJSON(url, body) {
+  try {
+    const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'},
+                                body: JSON.stringify(body || {})});
+    return await r.json().catch(() => ({ok:false, error:'unexpected reply'}));
+  } catch (e) { return {ok:false, error:'no connection to the Pi'}; }
+}
+
+// --- keep the screen alive while shooting ----------------------------------
+async function syncWakeLock(running) {
+  try {
+    if (running && !wakeLock && 'wakeLock' in navigator) {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => { wakeLock = null; });
+    } else if (!running && wakeLock) {
+      await wakeLock.release(); wakeLock = null;
+    }
+  } catch (e) { /* refused (often plain http) - not worth bothering the user */ }
+}
+
+// --- status ----------------------------------------------------------------
+async function refresh() {
+  let d;
+  try { d = await fetch('/api/status').then(r => r.json()); }
+  catch {
+    document.body.classList.add('stale');
+    $('state').textContent = 'no link to pi';
+    if (wasReachable) { toast('Lost contact with the Pi. Still retrying…', true); wasReachable = false; }
+    return;
+  }
+  if (!wasReachable) { toast('Back in contact with the Pi.'); }
+  wasReachable = true;
+  document.body.classList.remove('stale');
+
+  const cam = d.camera || {}, seq = d.sequence || {};
+  lastSeq = seq;
+
+  $('clock').textContent = d.now;
+  // During a long exposure the countdown is the most useful thing on screen.
+  const exposing = seq.exposure_left != null && seq.exposure_left > 0;
+  $('state').textContent = (seq.mode === 'script' && seq.script_name ? seq.script_name + ' · ' : '')
+                         + (exposing ? `exposing · ${Math.ceil(seq.exposure_left)}s left` : seq.state)
+                         + (seq.errors ? ` · ${seq.errors} err` : '');
+  const counter = (!seq.running && !seq.frames_done)
+    ? '—' : `${seq.frames_done} / ${seq.frames_total || '∞'}`;
+  $('counter').textContent = counter;
+  $('next').textContent = seq.seconds_to_next != null ? hms(seq.seconds_to_next) : '—';
+  $('cycle').textContent = seq.last_cycle_s
+    ? seq.last_cycle_s + ' s' + (seq.last_cycle_s < 10
+        ? ` (${(1/seq.last_cycle_s).toFixed(1)} fps)` : '')
+    : '—';
+  $('elapsed').textContent = seq.elapsed ? hms(seq.elapsed) : '—';
+  $('eta').textContent = clock(seq.eta);
+  $('model').textContent = cam.connected ? (cam.model || 'connected') : 'NOT CONNECTED';
+  $('model').className = cam.connected ? '' : 'off';
+  $('batt').textContent = cam.batterylevel || '—';
+
+  // Card space is what actually ends a night; the Pi disk only matters when
+  // frames are being downloaded to it.
+  const card = d.card;
+  $('card').textContent = card
+    ? `${card.free_gb} GB` + (card.free_images ? ` · ~${card.free_images} frames` : '')
+    : (cam.connected ? 'unknown' : '—');
+  const downloading = $('download').value === '1' || (seq.plan && seq.plan.download);
+  $('diskrow').style.display = downloading ? '' : 'none';
+  $('disk').textContent = d.disk_free_gb != null ? d.disk_free_gb + ' GB' : '—';
+  if (card && card.free_images !== cardFreeImages) {
+    cardFreeImages = card.free_images;
+    if (!seq.running) planSummary();
+  }
+  // In "fastest" mode the summary quotes the measured rate, so keep it current.
+  if (+$('interval_s').value === 0) planSummary();
+
+  $('progwrap').className = 'bar' + (seq.running && !seq.frames_total ? ' indeterminate' : '');
+  $('prog').style.width = seq.frames_total
+    ? Math.min(100, 100 * seq.frames_done / seq.frames_total) + '%' : '0';
+
+  $('log').textContent = (seq.log || []).join('\n') || 'no activity yet';
+  $('log').scrollTop = $('log').scrollHeight;
+
+  const warn = [];
+  if (d.camera_error) warn.push(d.camera_error);
+  if (cam.exposuremode && !/^m/i.test(cam.exposuremode)) warn.push('Mode dial is not on M.');
+  if (String(cam.longexpnr).toLowerCase() === '1')
+    warn.push('Long Exposure NR is on — it doubles every frame’s cycle time.');
+  if (card && card.free_images != null && card.free_images < 20)
+    warn.push(`Camera card nearly full (~${card.free_images} frames left).`);
+  if (downloading && d.disk_free_gb != null && d.disk_free_gb < 1)
+    warn.push('Pi disk almost full.');
+  if (seq.last_error) warn.push('last error: ' + seq.last_error);
+  $('warn').textContent = warn.join('  ·  ');
+
+  paused = seq.state === 'paused';
+  const label = paused ? 'RESUME' : 'PAUSE';
+  $('rbpause').textContent = label;
+  $('runbar').className = seq.running ? 'on' : '';
+  $('rbstate').textContent = paused ? 'paused'
+                           : (exposing ? `exposing ${Math.ceil(seq.exposure_left)}s` : seq.state);
+  $('rbcount').textContent = counter;
+
+  $('go').disabled = seq.running || !cam.connected;
+  $('runscript').disabled = seq.running || !cam.connected;
+  $('testbtn').disabled = seq.running || !cam.connected;
+  $('applybtn').disabled = seq.running || !cam.connected;
+  SETTINGS.forEach(k => { $(k).disabled = seq.running; });
+
+  // Live view and the shutter cannot share the sensor.
+  if (seq.running && lvTimer) {
+    $('lvon').value = '0'; stopLiveview();
+    $('lverr').textContent = 'stopped: sequence running';
+  }
+  $('lvon').disabled = seq.running || !cam.connected;
+  $('logtag').textContent = (seq.log || []).length + ' lines';
+  $('scripttag').textContent = seq.mode === 'script' && seq.running ? 'running' : '';
+
+  if (cam.connected && !choicesLoaded) await loadChoices();
+  if (!cam.connected) choicesLoaded = false;
+  SETTINGS.forEach(k => { if (!dirty.has(k) && cam[k] != null) $(k).value = cam[k]; });
+
+  if (seq.last_shot && seq.last_shot.has_thumb) showThumb(seq.last_shot.at, seq.last_shot.name);
+  else if (seq.last_shot) { $('lastname').textContent = seq.last_shot.name;
+                            $('lasttag').textContent = seq.last_shot.name; }
+
+  syncWakeLock(seq.running);
+
+  // Reading the network state shells out to nmcli, so poll it slowly and only
+  // while the panel is actually open.
+  if ($('adminpanel').open && (netTick++ % 5) === 0) loadNetwork();
+}
+
+// Polling is paused while the page is hidden, so a phone in your pocket is not
+// hammering the Pi and burning its own battery.
+let poll = null;
+function startPolling() {
+  if (poll) return;
+  refresh();
+  poll = setInterval(refresh, 1000);
+}
+function stopPolling() { if (poll) { clearInterval(poll); poll = null; } }
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { stopPolling(); stopLiveview(); }
+  else { startPolling(); syncWakeLock(lastSeq.running); }
+});
+
+initPanels();
+bulbChanged();
+planSummary();
+updateApply();
+loadScripts();
+if ($('adminpanel').open) loadNetwork();
+startPolling();
+</script>
+</body>
+</html>

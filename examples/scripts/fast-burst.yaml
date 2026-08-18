@@ -1,0 +1,15 @@
+name: Fast burst
+description: >
+  30 frames as fast as the camera will go, for meteors, lightning, wildlife or
+  anything else that will not wait. Shoot JPEG rather than RAW — the buffer
+  drains far faster, which is what actually limits the frame rate.
+
+steps:
+  - set:
+      imageformat: "JPEG Fine"
+      shutterspeed: "1/2000"
+      iso: "3200"
+  - message: "burst starting"
+  - repeat: 30
+    steps:
+      - capture:

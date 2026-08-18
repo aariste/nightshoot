@@ -1,0 +1,17 @@
+name: Star trails until dawn
+description: >
+  Continuous 25 s frames with a short gap, running until 05:30. Stack the RAWs
+  afterwards with a lighten blend to build the trails.
+
+steps:
+  - set:
+      imageformat: "NEF (Raw)"
+      shutterspeed: "25"
+      iso: "800"
+  - message: "settling before first frame"
+  - wait: 15
+  - repeat: forever
+    every: 28          # slot-aligned, so the gaps between trails stay constant
+    until: "05:30"
+    steps:
+      - capture:

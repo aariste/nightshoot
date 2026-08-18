@@ -1,0 +1,9 @@
+# Force LF everywhere. A CR in install.sh makes the Pi fail with
+# "env: 'bash\r': No such file or directory", which is painful to diagnose.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary

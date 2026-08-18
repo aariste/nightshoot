@@ -1,0 +1,18 @@
+name: Long bulb trails (4 min each)
+description: >
+  Sixty 4-minute bulb exposures. Set the camera's shutter speed to Bulb before
+  running — the script does that on the first line, but confirm it took effect.
+  Long Exposure NR must be OFF or you will lose half the night to dark frames.
+
+steps:
+  - set:
+      imageformat: "NEF (Raw)"
+      shutterspeed: "Bulb"
+      iso: "400"
+  - message: "starting 4-minute bulb trails"
+  - wait: 20
+  - repeat: 60
+    steps:
+      - capture:
+          bulb: 240
+      - wait: 10       # let the card finish writing before reopening the shutter

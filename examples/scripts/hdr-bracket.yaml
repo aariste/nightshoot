@@ -1,0 +1,23 @@
+name: HDR bracket every 5 minutes
+description: >
+  Three-frame exposure bracket repeated every 5 minutes until dawn. Good for
+  landscapes where the sky and foreground need different exposures, and for
+  blue-hour to full-dark transitions.
+
+vars:
+  base_iso: "400"
+
+steps:
+  - set:
+      imageformat: "NEF (Raw)"
+      iso: "{{base_iso}}"
+  - repeat: forever
+    every: 300
+    until: "05:00"
+    steps:
+      - message: "bracket {{i}}"
+      - for_each:
+          setting: shutterspeed
+          values: ["2", "8", "30"]
+        steps:
+          - capture:

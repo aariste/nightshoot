@@ -1,0 +1,21 @@
+[Unit]
+Description=NightShoot - gphoto2 night intervalometer for Nikon Z
+Documentation=file:/opt/nightshoot/README.md
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/nightshoot
+Environment=NIGHTSHOOT_STATE=/var/lib/nightshoot
+Environment=NIGHTSHOOT_PORT=8080
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/nightshoot/venv/bin/python -m nightshoot.app
+Restart=always
+RestartSec=5
+# A crashed capture must never take the whole rig down for the night.
+StartLimitIntervalSec=0
+
+[Install]
+WantedBy=multi-user.target

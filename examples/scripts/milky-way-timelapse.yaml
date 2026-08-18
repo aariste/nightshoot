@@ -1,0 +1,16 @@
+name: Milky Way timelapse
+description: >
+  400 frames at 15 s / ISO 3200 on an 18 s cadence — about 2 hours of shooting
+  for roughly 16 seconds of 25 fps video.
+
+steps:
+  - set:
+      imageformat: "NEF (Raw)"
+      shutterspeed: "15"
+      iso: "3200"
+  - wait: 10
+  - repeat: 400
+    every: 18
+    steps:
+      - capture:
+  - message: "timelapse finished"
