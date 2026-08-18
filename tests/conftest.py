@@ -81,7 +81,9 @@ class FakeCameraState:
         self.supports_trigger = True
         self.pending_files = []      # fired but not yet reported as written
         self.buffer_limit = 0        # 0 = unlimited; else error when full
-        self.model = "Nikon Z50"
+        self.model = "Nikon Z 50"        # libgphoto2 abilities: includes vendor
+        self.camera_model = "Z 50"       # the 'cameramodel' widget: does not
+        self.manufacturer = "Nikon Corporation"
 
 
 STATE = FakeCameraState()
@@ -119,6 +121,10 @@ def _build_module() -> types.ModuleType:
             return self._name
 
         def get_value(self):
+            if self._name == "__cameramodel__":
+                return STATE.camera_model
+            if self._name == "__manufacturer__":
+                return STATE.manufacturer
             return STATE.values[self._name]
 
         def set_value(self, value):
@@ -150,6 +156,11 @@ def _build_module() -> types.ModuleType:
 
     class Config:
         def get_child_by_name(self, name):
+            # Identity widgets, which real bodies expose alongside the settings.
+            if name == "cameramodel" and STATE.camera_model is not None:
+                return Widget("__cameramodel__")
+            if name in ("manufacturer", "make") and STATE.manufacturer is not None:
+                return Widget("__manufacturer__")
             if name not in STATE.values:
                 raise GPhoto2Error(-1, f"no widget named {name}")
             return Widget(name)
@@ -189,6 +200,9 @@ def _build_module() -> types.ModuleType:
 
         def get_summary(self):
             return STATE.model
+
+        def get_abilities(self):
+            return types.SimpleNamespace(model=STATE.model)
 
         def capture(self, capture_type):
             if STATE.fail_captures > 0:

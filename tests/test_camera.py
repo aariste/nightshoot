@@ -110,7 +110,7 @@ class TestSnapshot:
     def test_reports_the_essentials(self, camera):
         snap = camera.snapshot()
         assert snap["connected"] is True
-        assert snap["model"] == "Nikon Z50"
+        assert snap["model"] == "Nikon Z 50"
         assert snap["shutter_seconds"] == pytest.approx(20.0)
 
     def test_never_blocks_during_a_long_exposure(self, camera, camera_state):

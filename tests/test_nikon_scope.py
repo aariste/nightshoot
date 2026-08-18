@@ -102,25 +102,82 @@ class TestMissingControls:
 
 
 class TestVendorDetection:
-    def test_a_nikon_is_recognised(self, camera):
-        assert camera.is_nikon is True
-        assert camera.snapshot()["vendor_warning"] is None
+    """Regression: a Z50 reports itself as 'Z 50', with no manufacturer.
 
-    def test_a_non_nikon_is_flagged(self, camera_state, state_dir):
-        camera_state.model = "Canon EOS R6"
+    The first version of this check looked for the word "nikon" in the model
+    string and so warned about the exact camera the tool was written for.
+    """
+
+    @pytest.mark.parametrize("model", [
+        "Nikon Z 50", "Z 50", "Z 6_2", "Z fc", "Z 9",
+        "D5300", "D850", "D7500", "Df", "COOLPIX P1000", "Nikon DSC D3500",
+    ])
+    def test_nikon_bodies_are_recognised(self, camera_state, state_dir, model):
+        camera_state.model = model
+        camera_state.manufacturer = None      # worst case: no vendor published
+        camera_state.camera_model = model
+        cam = Camera(thumb_dir=str(state_dir / "thumbs"))
+        cam.connect()
+        try:
+            assert cam.is_nikon is True, f"{model!r} not recognised as Nikon"
+            assert cam.snapshot()["vendor_warning"] is None
+        finally:
+            cam.disconnect()
+
+    def test_manufacturer_alone_is_enough(self, camera_state, state_dir):
+        camera_state.model = "Some Unlabelled Body"
+        camera_state.manufacturer = "Nikon Corporation"
+        cam = Camera(thumb_dir=str(state_dir / "thumbs"))
+        cam.connect()
+        try:
+            assert cam.is_nikon is True
+        finally:
+            cam.disconnect()
+
+    @pytest.mark.parametrize("model,vendor", [
+        ("Canon EOS R6", "Canon"), ("Sony ILCE-7M3", "Sony"),
+        ("Fujifilm X-T4", "Fujifilm"), ("Panasonic Lumix GH5", "Panasonic"),
+    ])
+    def test_other_vendors_are_flagged(self, camera_state, state_dir, model, vendor):
+        camera_state.model = model
+        camera_state.manufacturer = vendor
+        camera_state.camera_model = model
         cam = Camera(thumb_dir=str(state_dir / "thumbs"))
         cam.connect()
         try:
             assert cam.is_nikon is False
             warning = cam.snapshot()["vendor_warning"]
-            assert warning and "not a Nikon" in warning
-            assert "Canon EOS R6" in warning
+            assert warning and vendor.lower() in warning.lower()
+        finally:
+            cam.disconnect()
+
+    def test_an_unrecognised_body_is_not_warned_about(self, camera_state, state_dir):
+        """Absence of evidence is not evidence: stay quiet rather than cry wolf."""
+        camera_state.model = "Mystery Cam 9000"
+        camera_state.manufacturer = None
+        camera_state.camera_model = "Mystery Cam 9000"
+        cam = Camera(thumb_dir=str(state_dir / "thumbs"))
+        cam.connect()
+        try:
+            assert cam.snapshot()["vendor_warning"] is None
+        finally:
+            cam.disconnect()
+
+    def test_prefers_the_model_that_names_the_vendor(self, camera_state, state_dir):
+        """libgphoto2's abilities carry 'Nikon Z 50'; the widget says 'Z 50'."""
+        camera_state.model = "Nikon Z 50"
+        camera_state.camera_model = "Z 50"
+        cam = Camera(thumb_dir=str(state_dir / "thumbs"))
+        cam.connect()
+        try:
+            assert cam.model == "Nikon Z 50"
         finally:
             cam.disconnect()
 
     def test_a_non_nikon_still_connects(self, camera_state, state_dir, wait_for):
         """Flagged, not blocked: much of this is plain PTP."""
         camera_state.model = "Canon EOS R6"
+        camera_state.manufacturer = "Canon"
         cam = Camera(thumb_dir=str(state_dir / "thumbs"))
         cam.connect()
         try:
@@ -142,13 +199,14 @@ class TestVendorDetection:
                                                  monkeypatch):
         from nightshoot import app as appmod
         camera_state.model = "Sony ILCE-7M3"
+        camera_state.manufacturer = "Sony"
         cam = Camera(thumb_dir=str(state_dir / "thumbs"))
         cam.connect()
         monkeypatch.setattr(appmod, "camera", cam)
         try:
             body = client.get("/api/status").get_json()
             assert body["camera"]["is_nikon"] is False
-            assert "not a Nikon" in body["camera"]["vendor_warning"]
+            assert "Sony" in body["camera"]["vendor_warning"]
         finally:
             cam.disconnect()
 

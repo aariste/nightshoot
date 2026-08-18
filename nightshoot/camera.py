@@ -46,6 +46,22 @@ CONFIG_ALIASES = {
 #: blocked beyond the warning; it simply will not have been tested.
 ALLOW_ANY_VENDOR = os.environ.get("NIGHTSHOOT_ALLOW_ANY", "").lower() in ("1", "true", "yes")
 
+#: Nikon bodies often report a model with no manufacturer in it — a Z50 says
+#: just "Z 50" — so recognise the naming schemes as well as the word "nikon".
+#:   Z 50, Z6_2, Z fc, D5300, D850, COOLPIX P1000, Df, 1 J5
+NIKON_MODEL_RE = re.compile(
+    r"^\s*(nikon\b|z\s*\d|z\s*f|d\d{1,4}\b|df\b|coolpix\b|1\s+[jvs]\d)",
+    re.IGNORECASE,
+)
+
+#: Other vendors, used only to decide whether we are *confident* the body is not
+#: a Nikon. An unrecognised name is left alone rather than warned about.
+OTHER_VENDOR_RE = re.compile(
+    r"\b(canon|sony|fujifilm|fuji|olympus|om system|panasonic|lumix|pentax|"
+    r"ricoh|leica|sigma|hasselblad|gopro|kodak|casio|samsung)\b",
+    re.IGNORECASE,
+)
+
 # Widget type ids vary between libgphoto2 builds, so map them by name.
 WIDGET_TYPE_NAMES = {}
 for _const, _label in (
@@ -196,6 +212,7 @@ class Camera:
         self._snapshot_cache: dict | None = None
         self._can_trigger: bool | None = None
         self._bulb_supported: bool | None = None
+        self._manufacturer = ""
         self._vendor_warning: str | None = None
         self._shutter_s: float | None = None
         self._shutter_at = 0.0
@@ -230,6 +247,7 @@ class Camera:
                     cam.init()
                     self._cam = cam
                     self._model = self._read_summary_model(cam)
+                    self._manufacturer = self._read_manufacturer()
                     self._bulb_supported = None
                     self._can_trigger = None
                     self._check_vendor()
@@ -264,17 +282,25 @@ class Camera:
         return self._cam
 
     def _check_vendor(self) -> None:
-        """Flag a non-Nikon body rather than half-working in silence.
+        """Warn only when this is confidently *not* a Nikon.
 
-        Nothing is blocked — much of NightShoot is plain PTP and may well work —
-        but the user is told plainly that this combination is untested.
+        Model strings are unreliable — a Z50 reports itself as 'Z 50', with no
+        manufacturer at all — so an unrecognised name is left alone. Crying wolf
+        at the camera the tool was built for is worse than staying quiet.
         """
         self._vendor_warning = None
         if self.is_nikon:
             return
+        identity = f"{self._manufacturer} {self._model}".strip()
+        other = OTHER_VENDOR_RE.search(identity)
+        if not other:
+            log.info("could not identify the vendor of '%s'; assuming Nikon", self._model)
+            return
+
         message = (
-            f"'{self._model}' is not a Nikon. NightShoot is built and tested "
-            f"for Nikon bodies only; bulb, live view and burst may not work here."
+            f"'{self._model}' looks like a {other.group(1)} body. NightShoot is "
+            f"built and tested for Nikon only; bulb, live view and burst may not "
+            f"work here."
         )
         self._vendor_warning = message
         if ALLOW_ANY_VENDOR:
@@ -284,16 +310,42 @@ class Camera:
 
     @staticmethod
     def _read_summary_model(cam: gp.Camera) -> str:
+        """A human-readable model name, preferring one that names the vendor.
+
+        Bodies report themselves inconsistently: a Z50's 'cameramodel' widget
+        says just 'Z 50'. libgphoto2's own abilities carry the driver name,
+        which does include the manufacturer ('Nikon Z 50'), so prefer that.
+        """
+        try:
+            abilities = cam.get_abilities()
+            name = str(getattr(abilities, "model", "") or "").strip()
+            if name:
+                return name
+        except (gp.GPhoto2Error, AttributeError):
+            pass
         try:
             cfg = cam.get_config()
-            for name in ("cameramodel", "model"):
+            for widget in ("cameramodel", "model"):
                 try:
-                    return str(cfg.get_child_by_name(name).get_value())
+                    return str(cfg.get_child_by_name(widget).get_value())
                 except gp.GPhoto2Error:
                     continue
             return str(cam.get_summary()).splitlines()[0]
         except gp.GPhoto2Error:
             return "unknown"
+
+    def _read_manufacturer(self) -> str:
+        """The vendor string, when the body publishes one."""
+        try:
+            cfg = self._require().get_config()
+        except (gp.GPhoto2Error, CameraError):
+            return ""
+        for widget in ("manufacturer", "vendorextension", "make"):
+            try:
+                return str(cfg.get_child_by_name(widget).get_value()).strip()
+            except gp.GPhoto2Error:
+                continue
+        return ""
 
     def _reconnect_if_fatal(self, exc: gp.GPhoto2Error) -> None:
         if exc.code in FATAL_ERRORS:
@@ -560,7 +612,10 @@ class Camera:
 
     @property
     def is_nikon(self) -> bool:
-        return "nikon" in (self._model or "").lower()
+        """True when the manufacturer or the model naming says Nikon."""
+        if "nikon" in (self._manufacturer or "").lower():
+            return True
+        return bool(NIKON_MODEL_RE.match(self._model or ""))
 
     # ----------------------------------------------------------------- capture
 
