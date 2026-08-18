@@ -28,3 +28,6 @@ state/
 *.swp
 .DS_Store
 Thumbs.db
+
+# Deployment archives built with 'git archive'
+*.tar.gz

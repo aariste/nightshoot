@@ -556,10 +556,34 @@ curl -X POST http://192.168.7.1:8080/api/network/hotspot \
 curl -X POST http://192.168.7.1:8080/api/stop
 ```
 
-Security note: the service runs as root (needed for clean shutdown and
-unrestricted USB access) and the API is unauthenticated, so anyone on the network
-can upload and run scripts. That is fine for a WPA2-protected field hotspot — do
-not expose port 8080 to an untrusted network.
+Security note: the API is unauthenticated by default, so anyone who can reach
+port 8080 can upload scripts, change settings and shut the Pi down. That is a
+deliberate trade for a WPA2-protected field hotspot, where the Wi-Fi password
+*is* the access control. Two things are enforced regardless:
+
+- **Cross-origin requests are refused.** Without this, any web page you happened
+  to open while on the Pi's network could POST to `/api/shutdown` — no CORS
+  preflight is needed for a request that carries no body, so the browser would
+  simply send it.
+- **The hotspot password is not in the polled status.** It is served only from
+  `/api/network/hotspot-password`, when the Admin panel asks.
+
+If the Pi will ever share a network with anything you do not control, set a
+shared secret:
+
+```bash
+sudo systemctl edit nightshoot
+# [Service]
+# Environment=NIGHTSHOOT_TOKEN=a-long-random-string
+sudo systemctl restart nightshoot
+```
+
+Every request must then carry `X-NightShoot-Token: …` or `?token=…`.
+
+The service runs as root because it needs USB device access, NetworkManager and
+clean shutdown, but the unit file sandboxes it: read-only filesystem apart from
+`/var/lib/nightshoot`, no access to home directories, `NoNewPrivileges`, and a
+restricted set of address families.
 
 ---
 

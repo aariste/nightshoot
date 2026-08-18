@@ -1,74 +1,8 @@
 """Admin network pane: hotspot switching and its lockout guards."""
 
-import subprocess
-import types
-
 import pytest
 
 from nightshoot import network as net
-
-
-@pytest.fixture
-def world(monkeypatch):
-    """A fake NetworkManager whose state the test can drive."""
-    state = {"ap_up": False, "has_ap": True, "saved": ["HomeNet"],
-             "revert": False, "dnsmasq": True, "calls": [], "detached": []}
-
-    def fake_run(args, timeout=15.0):
-        state["calls"].append(list(args))
-        out = ""
-        if args[0] == "nmcli":
-            joined = " ".join(args[1:])
-            if joined == "-t -f DEVICE,TYPE device":
-                out = "eth0:ethernet\nwlan0:wifi\n"
-            elif joined == "-t -f NAME connection":
-                names = (["nightshoot-ap"] if state["has_ap"] else []) + state["saved"]
-                out = "\n".join(names) + "\n"
-            elif joined == "-t -f NAME,TYPE connection":
-                rows = [f"{n}:802-11-wireless" for n in state["saved"]]
-                if state["has_ap"]:
-                    rows.append("nightshoot-ap:802-11-wireless")
-                out = "\n".join(rows) + "\n"
-            elif joined == "-t -f NAME,TYPE,DEVICE connection show --active":
-                if state["ap_up"]:
-                    out = "nightshoot-ap:802-11-wireless:wlan0\n"
-                elif state["saved"]:
-                    out = f"{state['saved'][0]}:802-11-wireless:wlan0\n"
-            elif joined == "-g ipv4.address connection show nightshoot-ap":
-                out = "192.168.7.1/24\n"
-            elif joined == "-g 802-11-wireless.ssid connection show nightshoot-ap":
-                out = "NightShoot\n"
-            elif joined.startswith("-s -g 802-11-wireless-security.psk"):
-                out = "starrynight\n"
-            elif joined.startswith("-t -f IP4.ADDRESS device show"):
-                out = ("IP4.ADDRESS[1]:192.168.7.1/24\n" if state["ap_up"]
-                       else "IP4.ADDRESS[1]:192.168.1.42/24\n")
-        elif args[0] == "systemctl":
-            if args[1] == "is-active":
-                out = "active\n" if state["revert"] else "inactive\n"
-            elif args[1] == "stop":
-                state["revert"] = False
-        elif args[0] == "systemd-run":
-            state["revert"] = True
-        return subprocess.CompletedProcess(args, 0, out, "")
-
-    def fake_popen(args, **kwargs):
-        state["detached"].append(args)
-        script = args[-1]
-        if "connection up nightshoot-ap" in script:
-            state["ap_up"] = True
-        if "connection down nightshoot-ap" in script:
-            state["ap_up"] = False
-        return types.SimpleNamespace(pid=4242)
-
-    monkeypatch.setattr(net, "_run", fake_run)
-    monkeypatch.setattr(net.subprocess, "Popen", fake_popen)
-    monkeypatch.setattr(net.shutil, "which",
-                        lambda name: None if (name == "dnsmasq" and not state["dnsmasq"])
-                        else f"/usr/bin/{name}")
-    monkeypatch.setattr(net.os.path, "exists",
-                        lambda path: state["dnsmasq"] if path.endswith("dnsmasq") else False)
-    return state
 
 
 class TestStatus:
@@ -85,8 +19,17 @@ class TestStatus:
     def test_exposes_the_hotspot_profile(self, world):
         hotspot = net.status()["hotspot"]
         assert hotspot["ssid"] == "NightShoot"
-        assert hotspot["password"] == "starrynight"
         assert hotspot["address"] == "192.168.7.1"
+
+    def test_status_does_not_leak_the_psk(self, world):
+        """A stored credential should not ride along in every status poll."""
+        hotspot = net.status()["hotspot"]
+        assert "password" not in hotspot
+        assert "starrynight" not in str(net.status())
+
+    def test_the_psk_is_available_on_request(self, world):
+        hotspot = net.ap_profile(include_secret=True)
+        assert hotspot["password"] == "starrynight"
 
     def test_lists_fallback_networks_without_the_ap(self, world):
         assert net.status()["saved_networks"] == ["HomeNet"]

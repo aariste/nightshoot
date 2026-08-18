@@ -72,6 +72,7 @@ class Sequencer:
     def __init__(self, camera: Camera):
         self.camera = camera
         self._thread: threading.Thread | None = None
+        self._reserved = False        # claimed, worker may not have started yet
         self._stop = threading.Event()
         self._pause = threading.Event()
         self._lock = threading.RLock()
@@ -96,36 +97,49 @@ class Sequencer:
 
     @property
     def running(self) -> bool:
-        return self._thread is not None and self._thread.is_alive()
+        with self._lock:
+            # Reserved counts as running: the worker may not have started yet,
+            # but the camera is already spoken for.
+            if self._reserved:
+                return True
+            return self._thread is not None and self._thread.is_alive()
 
     def start(self, plan: Plan) -> None:
         problems = plan.validate()
         if problems:
             raise ValueError("; ".join(problems))
         self._arm(mode="interval", total=plan.frames, script_name=None)
-        self.plan = plan
-        self._say(
-            f"sequence armed: {'unlimited' if plan.frames == 0 else plan.frames} frames, "
-            f"{plan.interval_s}s interval, "
-            f"{f'{plan.exposure_s}s bulb' if plan.bulb else 'camera shutter speed'}"
-        )
-        self._spawn(self._run_plan, plan)
+        try:
+            self.plan = plan
+            self._say(
+                f"sequence armed: {'unlimited' if plan.frames == 0 else plan.frames} frames, "
+                f"{plan.interval_s}s interval, "
+                f"{f'{plan.exposure_s}s bulb' if plan.bulb else 'camera shutter speed'}"
+            )
+            self._spawn(self._run_plan, plan)
+        except BaseException:
+            self._release()          # never leave the reservation stuck
+            raise
 
     def start_script(self, script: scriptlib.Script) -> None:
         self._arm(mode="script", total=script.estimated_frames or 0,
                   script_name=script.name)
-        problems = self._preflight(script)
-        if problems:
-            with self._lock:
-                self.state = "error"
-                self.last_error = problems[0]
-            for problem in problems:
-                self._say(f"script cannot run: {problem}")
-            raise ValueError(problems[0])
-        estimate = ("unknown" if script.estimated_frames is None
-                    else f"{script.estimated_frames} frame(s)")
-        self._say(f"script '{script.name}' armed ({estimate})")
-        self._spawn(self._run_script, script)
+        try:
+            problems = self._preflight(script)
+            if problems:
+                with self._lock:
+                    self.state = "error"
+                    self.last_error = problems[0]
+                for problem in problems:
+                    self._say(f"script cannot run: {problem}")
+                raise ValueError(problems[0])
+            estimate = ("unknown" if script.estimated_frames is None
+                        else f"{script.estimated_frames} frame(s)")
+            self._say(f"script '{script.name}' armed ({estimate})")
+            self._spawn(self._run_script, script)
+        except BaseException:
+            self._release()
+            raise
 
     def _preflight(self, script: scriptlib.Script) -> list[str]:
         """Check the script's settings against the camera before shooting.
@@ -185,10 +199,26 @@ class Sequencer:
     # ---------------------------------------------------------------- plumbing
 
     def _arm(self, mode: str, total: int, script_name: str | None) -> None:
-        if self.running:
-            raise RuntimeError("a sequence is already running")
-        if not self.camera.connected:
-            self.camera.connect()
+        """Claim the camera for a new run.
+
+        The claim is taken atomically: two simultaneous requests must not both
+        pass the "is anything running?" check and start workers that then fight
+        over one USB connection.
+        """
+        with self._lock:
+            if self._reserved or (self._thread is not None and self._thread.is_alive()):
+                raise RuntimeError("a sequence is already running")
+            self._reserved = True
+
+        try:
+            # Connecting can be slow, so it happens outside the lock — but the
+            # reservation above already keeps anyone else out.
+            if not self.camera.connected:
+                self.camera.connect()
+        except BaseException:
+            self._release()
+            raise
+
         with self._lock:
             self.mode = mode
             self.script_name = script_name
@@ -208,10 +238,18 @@ class Sequencer:
         self._stop.clear()
         self._pause.clear()
 
+    def _release(self) -> None:
+        """Drop the reservation. Safe to call more than once."""
+        with self._lock:
+            self._reserved = False
+
     def _spawn(self, target, argument) -> None:
-        self._thread = threading.Thread(
-            target=self._guard, args=(target, argument), name="sequencer", daemon=True)
-        self._thread.start()
+        with self._lock:
+            self._thread = threading.Thread(
+                target=self._guard, args=(target, argument),
+                name="sequencer", daemon=True)
+            thread = self._thread
+        thread.start()
 
     def _guard(self, target, argument) -> None:
         try:
@@ -224,6 +262,9 @@ class Sequencer:
                 self.state = "error"
                 self.last_error = str(exc)
             self._say(f"fatal: {exc}")
+        finally:
+            # The thread now owns "running"; the reservation has done its job.
+            self._release()
 
     def _eta(self, now: float) -> float | None:
         if not self.running or not self.frames_total or self.mode != "interval":

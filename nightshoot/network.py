@@ -11,6 +11,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 import os
+import shlex
 import shutil
 import subprocess
 
@@ -55,18 +56,25 @@ def wifi_device() -> str | None:
     return None
 
 
-def ap_profile() -> dict | None:
-    """SSID, password and address of the hotspot profile, if it exists."""
+def ap_profile(include_secret: bool = False) -> dict | None:
+    """SSID and address of the hotspot profile, if it exists.
+
+    The pre-shared key is omitted unless explicitly asked for: it is a stored
+    credential and should not be sprayed into every status poll.
+    """
     if AP_CON not in _nmcli_quiet("-t", "-f", "NAME", "connection").split("\n"):
         return None
     addr = _nmcli_quiet("-g", "ipv4.address", "connection", "show", AP_CON).strip()
-    return {
+    profile = {
         "connection": AP_CON,
         "ssid": _nmcli_quiet("-g", "802-11-wireless.ssid", "connection", "show", AP_CON).strip(),
-        "password": _nmcli_quiet("-s", "-g", "802-11-wireless-security.psk",
-                                 "connection", "show", AP_CON).strip(),
         "address": addr.split("/")[0] if addr else "",
     }
+    if include_secret:
+        profile["password"] = _nmcli_quiet(
+            "-s", "-g", "802-11-wireless-security.psk",
+            "connection", "show", AP_CON).strip()
+    return profile
 
 
 def saved_networks() -> list[str]:
@@ -84,7 +92,7 @@ def revert_pending() -> bool:
     return result.stdout.strip() == "active"
 
 
-def status() -> dict:
+def status(include_secret: bool = False) -> dict:
     device = wifi_device()
     active = _nmcli_quiet("-t", "-f", "NAME,TYPE,DEVICE", "connection", "show", "--active")
     current = None
@@ -100,7 +108,7 @@ def status() -> dict:
         first = raw.splitlines()[0] if raw.splitlines() else ""
         address = first.partition(":")[2].split("/")[0]
 
-    profile = ap_profile()
+    profile = ap_profile(include_secret=include_secret)
     return {
         "device": device,
         "mode": "hotspot" if current == AP_CON else ("wifi" if current else "offline"),
@@ -125,10 +133,25 @@ def client_is_on_hotspot(remote_addr: str | None) -> bool:
         return False
 
 
-def _detach(script: str) -> None:
-    """Run a shell snippet that must outlive this request and its connection."""
+def _detach(argv: list[str], delay: float) -> None:
+    """Run a command that must outlive this request and the connection it used.
+
+    Arguments are quoted rather than interpolated: NetworkManager profile names
+    are attacker-influenced in principle and this runs as root.
+    """
+    script = f"sleep {float(delay):.3f}; " + " ".join(shlex.quote(a) for a in argv)
     subprocess.Popen(
         ["/bin/sh", "-c", script],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL, start_new_session=True,
+    )
+
+
+def _detach_all(commands: list[list[str]], delay: float) -> None:
+    parts = [f"sleep {float(delay):.3f}"]
+    parts += [" ".join(shlex.quote(a) for a in argv) for argv in commands]
+    subprocess.Popen(
+        ["/bin/sh", "-c", "; ".join(parts)],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         stdin=subprocess.DEVNULL, start_new_session=True,
     )
@@ -142,15 +165,27 @@ def cancel_revert() -> None:
 def _arm_revert(seconds: int, back_to: str | None) -> bool:
     """Schedule an automatic undo. Returns False if we could not arm one."""
     if not shutil.which("systemd-run"):
+        log.warning("systemd-run is unavailable; cannot arm a revert timer")
+        return False
+    seconds = int(seconds)
+    if seconds <= 0:
         return False
     cancel_revert()
     device = wifi_device() or ""
-    undo = (f"/usr/bin/nmcli connection up {back_to}" if back_to
-            else f"/usr/bin/nmcli device connect {device}")
-    result = _run(["systemd-run", "--quiet", f"--on-active={int(seconds)}",
-                   f"--unit={REVERT_UNIT}", "/bin/sh", "-c",
-                   f"/usr/bin/nmcli connection down {AP_CON}; {undo}"], timeout=10)
-    return result.returncode == 0
+    undo = (["/usr/bin/nmcli", "connection", "up", back_to] if back_to
+            else ["/usr/bin/nmcli", "device", "connect", device])
+    script = "; ".join((
+        " ".join(shlex.quote(a) for a in
+                 ["/usr/bin/nmcli", "connection", "down", AP_CON]),
+        " ".join(shlex.quote(a) for a in undo),
+    ))
+    result = _run(["systemd-run", "--quiet", f"--on-active={seconds}",
+                   f"--unit={REVERT_UNIT}", "/bin/sh", "-c", script], timeout=10)
+    if result.returncode != 0:
+        log.error("could not arm the revert timer: %s",
+                  (result.stderr or result.stdout).strip())
+        return False
+    return True
 
 
 def set_hotspot(enabled: bool, revert_after: int | None = None,
@@ -179,7 +214,14 @@ def set_hotspot(enabled: bool, revert_after: int | None = None,
         if revert_after:
             armed = _arm_revert(revert_after,
                                 previous if previous != AP_CON else None)
-        _detach(f"sleep {delay}; /usr/bin/nmcli connection up {AP_CON}")
+            # The safety net is the whole reason it is safe to do this
+            # remotely. Switching without it could strand the Pi.
+            if not armed:
+                raise NetworkError(
+                    "could not arm the automatic revert, so the hotspot was not "
+                    "started — without it a failed switch could leave the Pi "
+                    "unreachable. Choose 'no revert' to proceed anyway.")
+        _detach(["/usr/bin/nmcli", "connection", "up", AP_CON], delay)
         return {"switching_to": "hotspot", "revert_armed": armed,
                 "revert_after": revert_after if armed else None,
                 "ssid": profile["ssid"], "address": profile["address"]}
@@ -189,6 +231,8 @@ def set_hotspot(enabled: bool, revert_after: int | None = None,
             "there are no other saved Wi-Fi networks, so turning the hotspot "
             "off would leave the Pi unreachable")
     cancel_revert()
-    _detach(f"sleep {delay}; /usr/bin/nmcli connection down {AP_CON}; "
-            f"/usr/bin/nmcli device connect {device}")
+    _detach_all([
+        ["/usr/bin/nmcli", "connection", "down", AP_CON],
+        ["/usr/bin/nmcli", "device", "connect", device],
+    ], delay)
     return {"switching_to": "wifi", "revert_armed": False, "revert_after": None}

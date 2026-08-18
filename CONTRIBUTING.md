@@ -59,6 +59,17 @@ fixed.
   at upload or pre-flight, never three hours into a night.
 - **Keep every file LF.** A stray CR makes the Pi fail with
   `env: 'bash\r': No such file or directory`. CI enforces this.
+- **Claim the camera atomically.** `Sequencer._arm` reserves under the lock
+  before the worker thread exists; checking `running` and spawning separately
+  let two requests both start a worker and fight over one USB connection.
+- **Validate JSON types explicitly.** `float()`, `int()` and `bool()` on
+  attacker-supplied JSON produce 500s and surprises — `bool("false")` is `True`.
+  Use the `_number` / `_integer` / `_flag` helpers in `app.py`, which raise
+  `BadRequest` and answer 400.
+- **Quote anything interpolated into a shell.** `network.py` runs as root;
+  NetworkManager profile names go through `shlex.quote`.
+- **Do not put secrets in polled responses.** The hotspot PSK is served only
+  from its own endpoint, on request.
 
 ## UI changes
 

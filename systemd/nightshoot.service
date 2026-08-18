@@ -1,21 +1,43 @@
 [Unit]
-Description=NightShoot - gphoto2 night intervalometer for Nikon Z
+Description=NightShoot - gphoto2 night intervalometer for Nikon cameras
 Documentation=file:/opt/nightshoot/README.md
 After=network.target
 Wants=network.target
 
 [Service]
 Type=simple
+# Root is needed for three things: claiming the camera over USB, switching
+# Wi-Fi through NetworkManager, and clean shutdown. The sandboxing below
+# removes what is not needed rather than dropping the user outright.
 User=root
 WorkingDirectory=/opt/nightshoot
 Environment=NIGHTSHOOT_STATE=/var/lib/nightshoot
 Environment=NIGHTSHOOT_PORT=8080
 Environment=PYTHONUNBUFFERED=1
+# Set a shared secret here if the Pi will ever sit on a network you do not
+# control. Requests must then carry X-NightShoot-Token or ?token=.
+# Environment=NIGHTSHOOT_TOKEN=change-me
 ExecStart=/opt/nightshoot/venv/bin/python -m nightshoot.app
 Restart=always
 RestartSec=5
 # A crashed capture must never take the whole rig down for the night.
 StartLimitIntervalSec=0
+
+# --- sandboxing -------------------------------------------------------------
+# Only these paths are writable; the rest of the filesystem is read-only.
+ProtectSystem=strict
+ReadWritePaths=/var/lib/nightshoot
+PrivateTmp=yes
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+# USB for the camera, netlink for NetworkManager, IP for the web UI.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+NoNewPrivileges=yes
 
 [Install]
 WantedBy=multi-user.target

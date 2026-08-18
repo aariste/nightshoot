@@ -69,6 +69,10 @@
   pre { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:9px;
         font-size:11px; max-height:190px; overflow:auto; margin:0; white-space:pre-wrap; }
   img#thumb, img  .adder { border-top:1px solid var(--line); margin-top:12px; padding-top:8px; }
+  button.linkish { width:auto; margin:0; padding:0; border:none; background:none;
+      color:var(--value); font:inherit; font-size:14px; text-decoration:underline;
+      letter-spacing:0; font-weight:400; cursor:pointer; }
+  button.linkish:active { background:none; color:var(--fg); }
   textarea { width:100%; background:var(--bg); color:var(--fg); border:1px solid var(--line);
              border-radius:8px; padding:10px 9px; font:inherit; font-size:14px;
              line-height:1.4; resize:vertical; white-space:pre; overflow-wrap:normal;
@@ -289,7 +293,10 @@
       <div class="kv"><span>network</span><span id="netname">—</span></div>
       <div class="kv"><span>pi address</span><span id="netaddr">—</span></div>
       <div class="kv" id="apinforow"><span>hotspot ssid</span><span id="apssid">—</span></div>
-      <div class="kv" id="appassrow"><span>hotspot password</span><span id="appass">—</span></div>
+      <div class="kv" id="appassrow"><span>hotspot password</span>
+        <span id="appass">
+          <button class="linkish" id="showpass" onclick="revealPassword()">show</button>
+        </span></div>
 
       <div class="warn" id="netwarn"></div>
 
@@ -778,7 +785,8 @@ async function loadNetwork() {
   $('netname').textContent = d.connection || '—';
   $('netaddr').textContent = d.address || '—';
   $('apssid').textContent = ap.ssid || '—';
-  $('appass').textContent = ap.password || '—';
+  // The password is fetched only when asked for, so it is not repeated in
+  // every status poll.
   $('admintag').textContent = on ? 'hotspot' : (d.connection || '');
   $('apbtn').textContent = on ? 'TURN HOTSPOT OFF' : 'TURN HOTSPOT ON';
   $('apbtn').className = on ? 'danger' : '';
@@ -843,6 +851,13 @@ async function cancelRevert() {
   const j = await postJSON('/api/network/cancel-revert', {});
   if (j.ok) { toast('Scheduled revert cancelled.'); await loadNetwork(); }
   else toast(j.error || 'could not cancel', true);
+}
+async function revealPassword() {
+  try {
+    const j = await fetch('/api/network/hotspot-password').then(r => r.json());
+    $('appass').textContent = j.ok ? (j.password || '(none set)')
+                                   : (j.error || 'unavailable');
+  } catch (e) { $('appass').textContent = 'no connection to the Pi'; }
 }
 async function postJSON(url, body) {
   try {
