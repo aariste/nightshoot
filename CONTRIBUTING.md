@@ -46,9 +46,15 @@ fixed.
 - **Never spawn the `gphoto2` CLI per frame.** Re-claiming the USB interface is
   the documented cause of Nikon Z50 timeouts
   ([libgphoto2#925](https://github.com/gphoto/libgphoto2/issues/925)).
-- **Match setting values by meaning, not by string.** Bodies disagree on
+- **Match setting values by meaning, not by string.** Nikon bodies disagree on
   spelling; `resolve_choice` handles it, within 1% so a typo is never silently
-  rounded to a different exposure.
+  rounded to a different exposure. Fast speeds are truncated to four decimals by
+  the camera, so `1/4000` arrives as `0.0002s` — invert that truncation rather
+  than taking the nearest value.
+- **Keep the scope Nikon.** Widget-name aliases exist because Nikon bodies vary
+  among themselves, not as a step toward multi-vendor support. Other brands need
+  different protocols, not different names; adding them without hardware to test
+  on produces code that looks generic and fails in the field.
 - **Validate scripts before writing and before arming.** A bad script must fail
   at upload or pre-flight, never three hours into a night.
 - **Keep every file LF.** A stray CR makes the Pi fail with

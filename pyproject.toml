@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "nightshoot"
 version = "1.4.0"
-description = "Raspberry Pi night intervalometer for gphoto2 cameras, driven from a phone"
+description = "Raspberry Pi night intervalometer for Nikon cameras, driven from a phone"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { file = "LICENSE" }

@@ -1,11 +1,11 @@
-# NightShoot — Raspberry Pi night intervalometer for gphoto2 cameras
+# NightShoot — Raspberry Pi night intervalometer for Nikon cameras
 
 [![CI](https://github.com/OWNER/nightshoot/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/nightshoot/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A headless Pi that drives a Z50 over USB with gphoto2 and is controlled from your
-phone over the Pi's own Wi-Fi hotspot. Built for multi-hour unattended sequences:
-star trails, night timelapse, deep-sky stacking sets.
+A headless Pi that drives a Nikon over USB with gphoto2 and is controlled from
+your phone over the Pi's own Wi-Fi hotspot. Built for multi-hour unattended
+sequences: star trails, night timelapse, deep-sky stacking sets.
 
 Why not just call the `gphoto2` CLI in a loop? Every invocation re-claims the USB
 interface, and the Z50 is known to time out under that pattern
@@ -13,11 +13,12 @@ interface, and the Z50 is known to time out under that pattern
 holds one libgphoto2 session open for the whole night and reconnects only when
 the link genuinely drops.
 
-Other cameras supported by libgphoto2 should work — widget names are looked up
-through alias lists, setting values are matched by meaning rather than spelling,
-and features like bulb and live view are probed at connect time. See
-[Other cameras](#10-other-cameras) for what adapts automatically and what does
-not. The Z50 is what it is tested against on real hardware.
+**Scope is Nikon on purpose.** Developed and tested on a Z50, and written to suit
+the Nikon range generally — widget names and shutter-speed spellings vary across
+bodies, so both are handled. Other vendors are a different shape rather than a
+different spelling (Canon holds the shutter open with a two-step remote-release
+protocol instead of a bulb toggle), and supporting them without hardware to test
+on would mean shipping guesses. See [Other cameras](#10-other-cameras).
 
 ---
 
@@ -580,59 +581,57 @@ for the layout and the list of mistakes the tests exist to prevent.
 
 ## 10. Other cameras
 
-NightShoot is developed against a Nikon Z50, but nothing is hard-coded to it.
-Anything libgphoto2 supports should work; the suite exercises the same code
-against Canon- and Sony-shaped fakes as well as the Nikon one.
+NightShoot is for Nikon. That is a deliberate limit, not an oversight.
 
-### What adapts by itself
+### Across the Nikon range
 
-**Widget names.** Vendors disagree: Nikon exposes `f-number` and `expprogram`,
-Canon uses `aperture` and `autoexposuremode`. Each setting is looked up through a
-list of candidates, so whichever your body uses is found.
+Nikon bodies disagree among themselves, and that is handled:
 
-**Value spelling.** Nikon reports `0.0166s`, Canon reports `1/60`, and both mean
-the same exposure. Values are matched by meaning, so a script written for one
-body runs on the other:
+- **Widget names.** A D5300 exposes `shutterspeed2`, `isospeed`, `imagequality`
+  and `capturemode` where a Z50 uses `shutterspeed`, `iso`, `imageformat` and
+  `expprogram`. Each setting is looked up through a list of candidates.
+- **Value spelling.** Some bodies report `0.0166s`, others `1/60`. Values are
+  matched by meaning, so scripts move between bodies unchanged.
+- **Missing controls.** Not every Nikon exposes a bulb toggle, and it disappears
+  entirely when the mode dial is off M. That is detected at connect time: the UI
+  refuses to enable bulb mode and explains why, rather than arming a sequence
+  that dies on its first frame.
 
-```yaml
-set: {shutterspeed: "1/60"}   # matches 0.0166s on a Nikon, 1/60 on a Canon
-set: {shutterspeed: "20"}     # matches 20.0000s or 20
-```
+### Why not other brands
 
-**Bulb.** Nikon exposes a simple `bulb` toggle; Canon drives `eosremoterelease`
-with press/release values. NightShoot probes for whichever exists and uses it. A
-body with neither reports bulb as unsupported instead of failing on the first
-frame — the UI refuses to enable bulb mode and says why.
+The differences are structural, not cosmetic:
 
-**Live view.** Tried as `viewfinder`, `eosviewfinder` or `liveview`; bodies that
-start live view implicitly on preview also work.
+- Canon holds the shutter open by driving `eosremoterelease` through press and
+  release values, after separately setting the shutter speed to `bulb`. Nikon
+  uses one toggle. Different protocol, not a different name.
+- Many Sony bodies refuse shutter-speed changes over PTP unless the camera is in
+  PC Remote mode.
+- Event models differ — the burst path depends on the camera reporting
+  `FILE_ADDED`, which not every driver does the same way.
 
-**Capture target.** "Memory card", "card" and "SDRAM" are all handled by matching
-against what the body actually lists.
+Each of those needs the hardware in hand to get right. Supporting them on paper
+would produce code that looks generic and fails in a field at 2am, which is worse
+than an honest limit.
 
-### What to expect
+### If you plug in something else
 
-| Brand | Expectation |
-|---|---|
-| **Nikon** | Tested on real hardware (Z50). Bulb, live view, burst all work. |
-| **Canon EOS** | Should work. Bulb goes through `eosremoterelease`. Untested on hardware. |
-| **Sony** | Basic capture and settings should work; many Sony bodies expose less over PTP, so bulb and capture target may be missing. |
-| **Others** | Anything in libgphoto2's [supported list](http://gphoto.org/proj/libgphoto2/support.php) is worth trying. |
-
-**This is honest guesswork outside Nikon.** The code adapts to the shapes those
-drivers present, and the tests prove it adapts, but only a real body proves it
-works. If you try another camera, `gphoto2 --list-config` and
-`gphoto2 --get-config shutterspeed` will show what it exposes — and a bug report
-with that output is enough to add support.
-
-### Checking a new body
+It is flagged, not blocked. NightShoot warns in the status panel that the body is
+untested and carries on — much of this is plain PTP and basic capture may work
+fine. Bulb, live view and burst are the parts most likely to fail.
 
 ```bash
-gphoto2 --auto-detect                 # is it recognised at all?
-gphoto2 --summary                     # what the driver knows about it
-gphoto2 --list-config                 # every setting it exposes
-gphoto2 --get-config shutterspeed     # current value plus valid choices
+NIGHTSHOOT_ALLOW_ANY=1        # silences the log warning; nothing else changes
 ```
 
-Then connect it and look at the **Camera** panel. If shutter, ISO, aperture and
-format populate and a test frame works, the rest of NightShoot will follow.
+To see what a body actually exposes:
+
+```bash
+gphoto2 --auto-detect
+gphoto2 --list-config
+gphoto2 --get-config shutterspeed
+```
+
+If you want another brand supported properly, that output plus a willingness to
+test is what it would take. For broad multi-vendor support today, use
+[INDI with Ekos](https://indilib.org/) — it has per-camera drivers maintained by
+people who own the bodies.

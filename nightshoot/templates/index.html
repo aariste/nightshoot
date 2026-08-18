@@ -560,7 +560,8 @@ function bulbChanged() {
   // Some bodies have no bulb control over USB at all; say so rather than
   // letting the sequence fail on the first frame.
   if (on && lastCam.connected && lastCam.supports_bulb === false) {
-    toast('This camera does not expose a bulb control over USB.', true);
+    toast('This camera is not exposing a bulb control. Set the mode dial to M '
+          + 'and the shutter speed to Bulb, then reconnect.', true);
     $('bulb').value = '0';
     $('exposure_s').disabled = true;
   }
@@ -926,6 +927,7 @@ async function refresh() {
 
   const warn = [];
   if (d.camera_error) warn.push(d.camera_error);
+  if (cam.vendor_warning) warn.push(cam.vendor_warning);
   if (cam.exposuremode && !/^m/i.test(cam.exposuremode)) warn.push('Mode dial is not on M.');
   if (String(cam.longexpnr).toLowerCase() === '1')
     warn.push('Long Exposure NR is on — it doubles every frame’s cycle time.');

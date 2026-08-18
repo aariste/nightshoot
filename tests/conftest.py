@@ -81,6 +81,7 @@ class FakeCameraState:
         self.supports_trigger = True
         self.pending_files = []      # fired but not yet reported as written
         self.buffer_limit = 0        # 0 = unlimited; else error when full
+        self.model = "Nikon Z50"
 
 
 STATE = FakeCameraState()
@@ -187,7 +188,7 @@ def _build_module() -> types.ModuleType:
             pass
 
         def get_summary(self):
-            return "Nikon Z50"
+            return STATE.model
 
         def capture(self, capture_type):
             if STATE.fail_captures > 0:
