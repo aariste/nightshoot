@@ -377,6 +377,7 @@ class Runtime:
     def log(self, message: str) -> None: raise NotImplementedError
     def sleep(self, seconds: float) -> None: raise NotImplementedError
     def sleep_until(self, timestamp: float) -> None: raise NotImplementedError
+    def sleep_until_monotonic(self, target: float) -> None: raise NotImplementedError
     def apply_settings(self, settings: dict) -> None: raise NotImplementedError
     def capture(self, bulb: float | None, download: bool) -> None: raise NotImplementedError
     def check_stop(self) -> None: raise NotImplementedError
@@ -435,7 +436,7 @@ def _run_steps(steps, env: dict, rt: Runtime) -> None:
                 rt.log(f"looping until {step['until']}")
 
             index = 0
-            started = time.time()
+            started = time.monotonic()
             while infinite or index < count:
                 if deadline and time.time() >= deadline:
                     rt.log("reached the loop's end time")
@@ -444,5 +445,6 @@ def _run_steps(steps, env: dict, rt: Runtime) -> None:
                 _run_steps(step["steps"], dict(env, i=index + 1), rt)
                 index += 1
                 if every and (infinite or index < count):
-                    # Slot-aligned so the interval never drifts over a long night.
-                    rt.sleep_until(started + index * float(every))
+                    # Slot-aligned so the interval never drifts over a long
+                    # night; monotonic so an NTP clock step cannot bend it.
+                    rt.sleep_until_monotonic(started + index * float(every))

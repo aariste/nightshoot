@@ -445,7 +445,8 @@ class Camera:
                 widget.set_value(int(value))
             elif kind in ("radio", "menu"):
                 choices = [widget.get_choice(i) for i in range(widget.count_choices())]
-                widget.set_value(resolve_choice(key, value, choices))
+                value = resolve_choice(key, value, choices)
+                widget.set_value(value)
             elif kind == "range":
                 low, high, _step = widget.get_range()
                 try:
@@ -461,7 +462,11 @@ class Camera:
             # Anything we just changed makes the cached reads stale.
             self._snapshot_cache = None
             if key in ("shutterspeed", "shutterspeed2", "exptime"):
-                self._shutter_at = 0.0
+                # We know exactly what was written, so the cache can be updated
+                # in place rather than invalidated — the capture path then
+                # never has to re-read it over PTP.
+                self._shutter_s = parse_duration(value)
+                self._shutter_at = time.time()
             if key == "imageformat":
                 self._storage_at = 0.0
 
@@ -536,6 +541,11 @@ class Camera:
             out["vendor_warning"] = self._vendor_warning
             # Lets the UI count down the frame in progress.
             out["shutter_seconds"] = parse_duration(out.get("shutterspeed"))
+            # The UI polls this endpoint anyway, so the shutter-duration cache
+            # stays warm for free — the capture path must never pay for a
+            # config read of its own.
+            self._shutter_s = out["shutter_seconds"]
+            self._shutter_at = time.time()
             self._snapshot_cache = out
             return out
         finally:
@@ -562,6 +572,15 @@ class Camera:
             pass
         finally:
             self._lock.release()
+        return self._shutter_s
+
+    def shutter_seconds_cached(self) -> float | None:
+        """Last known shutter duration, without touching the camera.
+
+        For the moment between an interval slot opening and the shutter firing:
+        a PTP config read there would jitter the actual shot time by however
+        long the read takes.
+        """
         return self._shutter_s
 
     def prepare_for_night(self, capture_to_card: bool = True) -> list[str]:
@@ -673,12 +692,19 @@ class Camera:
                 self._reconnect_if_fatal(exc)
                 raise CameraError(f"trigger failed: {exc}") from exc
 
-    def collect_new_files(self, timeout_ms: int = 1) -> list:
-        """Drain any files the camera has finished writing. Never blocks long."""
+    def collect_new_files(self, timeout_ms: int = 1, budget_s: float = 0.25) -> list:
+        """Drain any files the camera has finished writing. Never blocks long.
+
+        Nikon bodies interleave property-change events with file events, so a
+        non-file event must not end the drain — files would queue up behind the
+        chatter and the frame count would lag. Only a timeout (or the overall
+        time budget) stops it.
+        """
         found = []
         if self._cam is None or not self._lock.acquire(timeout=0.2):
             return found
         try:
+            end = time.monotonic() + budget_s
             while True:
                 try:
                     etype, data = self._cam.wait_for_event(timeout_ms)
@@ -686,8 +712,10 @@ class Camera:
                     return found
                 if etype == gp.GP_EVENT_FILE_ADDED:
                     found.append(data)
-                    continue
-                return found
+                elif etype == gp.GP_EVENT_TIMEOUT:
+                    return found
+                if time.monotonic() >= end:
+                    return found
         finally:
             self._lock.release()
 
@@ -706,8 +734,49 @@ class Camera:
                 return False
         return bool(self._bulb_supported)
 
+    def _bulb_toggles(self, cam):
+        """Prepared open/close operations for the bulb widget.
+
+        Closing is latency-critical: every millisecond spent assembling the
+        command happens while the shutter is still open, so it stretches the
+        real exposure. Prefer libgphoto2's single-config calls (one small PTP
+        transaction each); otherwise walk the config tree once, up front, and
+        reuse it for both toggles — never a fresh ``get_config`` at close time.
+        """
+        if hasattr(cam, "get_single_config") and hasattr(cam, "set_single_config"):
+            for name in CONFIG_ALIASES.get("bulb", ["bulb"]):
+                try:
+                    widget = cam.get_single_config(name)
+                except gp.GPhoto2Error:
+                    continue
+
+                def flip(value, name=name, widget=widget):
+                    widget.set_value(value)
+                    cam.set_single_config(name, widget)
+
+                return (lambda: flip(1)), (lambda: flip(0))
+
+        cfg = cam.get_config()
+        widget = self._find_widget(cfg, "bulb")
+        if widget is None:
+            raise CameraError(
+                "this camera is not exposing a bulb control. Check the mode dial "
+                "is on M and the shutter speed is set to Bulb, then reconnect."
+            )
+
+        def flip_tree(value):
+            widget.set_value(value)
+            cam.set_config(cfg)
+
+        return (lambda: flip_tree(1)), (lambda: flip_tree(0))
+
     def _capture_bulb(self, seconds: float):
-        """Hold the shutter open for a set time, then collect the new file."""
+        """Hold the shutter open for a set time, then collect the new file.
+
+        Timed on the monotonic clock: an NTP step mid-exposure (the Pi has no
+        RTC, and the clock jumps when it first reaches the internet) must not
+        lengthen or truncate a frame.
+        """
         cam = self._require()
         if not self.supports_bulb():
             raise CameraError(
@@ -716,20 +785,22 @@ class Camera:
             )
 
         self._drain_events(200)
-        self.set_setting("bulb", 1)
+        open_bulb, close_bulb = self._bulb_toggles(cam)
+        open_bulb()
         try:
-            deadline = time.time() + seconds
+            deadline = time.monotonic() + seconds
             while True:
-                remaining = deadline - time.time()
+                remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
                 time.sleep(min(remaining, 0.25))
         finally:
-            self.set_setting("bulb", 0)
+            close_bulb()
+            self._snapshot_cache = None
 
         # The file appears a moment after the shutter closes.
-        end = time.time() + max(30.0, seconds * 0.5 + 15.0)
-        while time.time() < end:
+        end = time.monotonic() + max(30.0, seconds * 0.5 + 15.0)
+        while time.monotonic() < end:
             etype, data = cam.wait_for_event(1000)
             if etype == gp.GP_EVENT_FILE_ADDED:
                 return data

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import collections
 import logging
+import math
 import threading
 import time
 from dataclasses import asdict, dataclass
@@ -23,6 +24,33 @@ log = logging.getLogger("nightshoot.sequencer")
 
 class Stopped(Exception):
     """Raised inside a worker when the user asks it to stop."""
+
+
+def next_slot(anchor: float, slot: int, interval: float, now: float) -> tuple[int, float]:
+    """The next shutter-open time on a fixed grid of ``anchor + n * interval``.
+
+    Sleeping ``interval`` between frames drifts: every cycle adds its own
+    overhead, and over a few hundred frames that is seconds. Anchoring every
+    slot to the start of the run instead keeps frame N at exactly
+    ``anchor + N * interval`` for the whole night.
+
+    Two late cases, handled differently on purpose:
+
+    * Less than one slot late (the exposure slightly overran the interval):
+      the returned target is in the past, so the caller fires immediately —
+      the camera, not the schedule, is the limit, and shooting at the maximum
+      rate is what the user wanted.
+    * A full slot or more late (error backoff, a stuck card write): skip the
+      missed slots and rejoin the grid at the next future one, rather than
+      machine-gunning frames to "catch up" a schedule that is meant to be
+      evenly spaced.
+    """
+    slot += 1
+    target = anchor + slot * interval
+    if now - target >= interval:
+        slot = math.ceil((now - anchor) / interval)
+        target = anchor + slot * interval
+    return slot, target
 
 
 class _TriggeredShot:
@@ -286,6 +314,26 @@ class Sequencer:
             self.state = state
 
     def _sleep_until(self, target: float) -> bool:
+        """Interruptible sleep until a wall-clock time (calendar deadlines).
+
+        Wall clock on purpose: an ``until: "05:30"`` means 05:30, even if NTP
+        steps the clock mid-wait.
+        """
+        return self._sleep_loop(target, time.time)
+
+    def _sleep_until_mono(self, target: float) -> bool:
+        """Interruptible sleep until a monotonic-clock time (durations).
+
+        Intervals and backoffs must not stretch or shrink when the wall clock
+        jumps — the Pi has no RTC, and NTP steps it whenever it first reaches
+        the internet.
+        """
+        return self._sleep_loop(target, time.monotonic)
+
+    def _sleep_for(self, seconds: float) -> bool:
+        return self._sleep_until_mono(time.monotonic() + seconds)
+
+    def _sleep_loop(self, target: float, clock) -> bool:
         """Interruptible sleep. False means we were told to stop."""
         while True:
             if self._stop.is_set():
@@ -294,23 +342,28 @@ class Sequencer:
                 self._set_state("paused")
                 time.sleep(0.25)
                 # Paused time is not lost: push the target out.
-                target = max(target, time.time())
+                target = max(target, clock())
                 continue
-            remaining = target - time.time()
+            remaining = target - clock()
             if remaining <= 0:
                 return True
             with self._lock:
                 if self.state == "paused":
                     self.state = "waiting"
-                self.next_shot_at = target
+                # Projected onto the wall clock for the UI, whichever clock
+                # the deadline itself lives on.
+                self.next_shot_at = time.time() + remaining
             time.sleep(min(remaining, 0.25))
 
     def _begin_exposure(self, seconds: float | None) -> None:
         """Mark a frame as in progress so the UI can count it down."""
         if seconds is None:
-            # Cached: reading the config per frame costs more than a fast frame.
+            # Cache-only on purpose: this runs between the slot boundary and
+            # the shutter firing, and a PTP config read here would jitter the
+            # actual shot time by however long the read takes. The cache is
+            # refreshed during the waiting phase instead.
             try:
-                seconds = self.camera.shutter_seconds()
+                seconds = self.camera.shutter_seconds_cached()
             except Exception:  # noqa: BLE001 - a countdown is never worth failing over
                 seconds = None
         with self._lock:
@@ -325,7 +378,7 @@ class Sequencer:
             self.exposing_until = None
 
     def _record(self, shot) -> None:
-        now = time.time()
+        now = time.monotonic()
         with self._lock:
             # Measured shutter-to-shutter time: the honest answer to "how fast
             # can this actually go?", which is bounded by the camera, not by us.
@@ -357,6 +410,7 @@ class Sequencer:
         self._set_state("exposing")
         consecutive = 0
         fired = 0
+        last_collect = time.monotonic()
 
         while not self._stop.is_set():
             if plan.frames and fired >= plan.frames:
@@ -379,18 +433,23 @@ class Sequencer:
                     self._set_state("error")
                     return self._finish("aborted after repeated capture errors", ok=False)
                 # A full buffer shows up as an error; easing off lets it drain.
-                if not self._sleep_until(time.time() + min(5.0, 0.5 * consecutive)):
+                if not self._sleep_for(min(5.0, 0.5 * consecutive)):
                     return self._finish("stopped during error backoff")
 
-            for path in self.camera.collect_new_files():
-                self._record(_TriggeredShot(path))
+            # Collecting is a USB event poll, so doing it after every trigger
+            # caps the fire rate. A few times a second keeps the frame count
+            # honest without slowing the shutter down.
+            if time.monotonic() - last_collect >= 0.2:
+                for path in self.camera.collect_new_files():
+                    self._record(_TriggeredShot(path))
+                last_collect = time.monotonic()
 
         # The last few frames are still being written when the loop ends.
-        deadline = time.time() + 20.0
-        while self.frames_done < fired and time.time() < deadline:
+        deadline = time.monotonic() + 20.0
+        while self.frames_done < fired and time.monotonic() < deadline:
             for path in self.camera.collect_new_files(timeout_ms=200):
                 self._record(_TriggeredShot(path))
-            if self._stop.is_set() and time.time() > deadline - 15.0:
+            if self._stop.is_set() and time.monotonic() > deadline - 15.0:
                 break
 
         self._finish("burst complete" if not self._stop.is_set() else "stopped by user")
@@ -418,7 +477,7 @@ class Sequencer:
 
         if plan.start_delay_s > 0:
             self._say(f"starting in {plan.start_delay_s:.0f}s (let vibrations settle)")
-            if not self._sleep_until(time.time() + plan.start_delay_s):
+            if not self._sleep_for(plan.start_delay_s):
                 return self._finish("stopped before first frame")
 
         # With no interval and nothing to download, the shutter can be fired
@@ -428,6 +487,15 @@ class Sequencer:
                 and self.camera.supports_trigger():
             return self._run_burst(plan)
 
+        if not plan.bulb:
+            # Warm the shutter-duration cache now, forcing a fresh read; the
+            # capture path only ever reads the cache, so the first frame's
+            # countdown works too.
+            self.camera.shutter_seconds(max_age=0.0)
+
+        # Every shot sits on a fixed grid anchored here — see next_slot().
+        anchor = time.monotonic()
+        slot = 0
         consecutive = 0
         while not self._stop.is_set():
             if plan.frames and self.frames_done >= plan.frames:
@@ -435,7 +503,6 @@ class Sequencer:
             if plan.until_ts and time.time() >= plan.until_ts:
                 return self._finish("reached scheduled end time")
 
-            slot_start = time.time()
             self._begin_exposure(plan.exposure_s if plan.bulb else None)
 
             try:
@@ -453,13 +520,23 @@ class Sequencer:
                 if not self._note_error(exc, consecutive, plan.max_consecutive_errors):
                     self._set_state("error")
                     return self._finish("aborted after repeated capture errors", ok=False)
-                if not self._sleep_until(time.time() + min(30.0, 3.0 * consecutive)):
+                if not self._sleep_for(min(30.0, 3.0 * consecutive)):
                     return self._finish("stopped during error backoff")
                 continue
 
+            if plan.frames and self.frames_done >= plan.frames:
+                return self._finish("sequence complete")
+
             self._set_state("waiting")
-            if not self._sleep_until(slot_start + plan.interval_s):
-                return self._finish("stopped by user")
+            if plan.interval_s:
+                if not plan.bulb:
+                    # Refresh the countdown cache here, in the waiting phase,
+                    # where a PTP round trip cannot delay a shutter opening.
+                    self.camera.shutter_seconds()
+                slot, target = next_slot(anchor, slot, plan.interval_s,
+                                         time.monotonic())
+                if not self._sleep_until_mono(target):
+                    return self._finish("stopped by user")
 
         self._finish("stopped by user")
 
@@ -501,11 +578,18 @@ class _ScriptRuntime(scriptlib.Runtime):
         self.seq._say(message)
 
     def sleep(self, seconds: float) -> None:
-        self.sleep_until(time.time() + seconds)
+        # A duration, so it lives on the monotonic clock: "wait: 10" means ten
+        # real seconds even if NTP steps the wall clock mid-wait.
+        self.sleep_until_monotonic(time.monotonic() + seconds)
 
     def sleep_until(self, timestamp: float) -> None:
         self.seq._set_state("waiting")
         if not self.seq._sleep_until(timestamp):
+            raise Stopped()
+
+    def sleep_until_monotonic(self, target: float) -> None:
+        self.seq._set_state("waiting")
+        if not self.seq._sleep_until_mono(target):
             raise Stopped()
 
     def apply_settings(self, settings: dict) -> None:
