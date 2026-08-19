@@ -167,12 +167,12 @@ Pi as well — a Z50 NEF is ~25 MB, so 400 frames needs ~10 GB free.
 
 ### Ending the night
 
-Press **Stop**, then **System → Shut down Pi** in the UI before pulling power.
+Press **Stop**, then **Admin → Shut down** in the UI before pulling power.
 Yanking a Pi mid-write is the single most common way to corrupt the SD card.
 
 ### Collapsible panels
 
-Live view, Scripts, Last frame, Log and System are collapsible, and each one
+Live view, Scripts, Last frame, Log and Admin are collapsible, and each one
 remembers whether you left it open — per device, like the theme.
 
 The UI shows, at a glance: frame count, countdown to the next frame, elapsed time,
@@ -224,7 +224,33 @@ curl -X POST http://192.168.7.1:8080/api/settings \
 
 Scripts can set any of them too — see the `set:` command below.
 
-### Admin — switching between hotspot and Wi-Fi
+### Admin
+
+One panel for everything to do with the Pi rather than the camera, grouped into
+Network, Pi health, About, Service log and Power.
+
+**Network** — which network the Pi is on, its address, the hotspot SSID and
+(on request) its password, plus the switch between hotspot and Wi-Fi described
+below.
+
+**Pi health** — CPU temperature, under-voltage and throttling flags, SD card
+space, memory, load and uptime. It warns about the two failures that actually
+ruin nights: **under-voltage**, which is the commonest cause of mysterious Pi
+misbehaviour and means a better supply or cable, and a CPU above 70 °C, since
+the Pi throttles hard at 80.
+
+**About** — hostname, NightShoot version, connected camera, and the Pi's clock.
+Worth a glance: a Pi with no network loses the time across a reboot, and a wrong
+clock makes "stop at 05:30" and every file timestamp wrong.
+
+**Service log** — the last 120 journal lines, so a failed night can be diagnosed
+in the field instead of over SSH the next day.
+
+**Power** — *Restart service* reconnects the camera without rebooting, and is
+the first thing to try if the camera stops responding. *Reboot* and *Shut down*
+are both confirmed, and all three refuse while a sequence is running.
+
+### Switching between hotspot and Wi-Fi
 
 The **Admin** panel shows which network the Pi is on, its address, and the
 hotspot's SSID and password, with one button to switch modes.
@@ -529,6 +555,7 @@ nightshoot/
     ├── camera.py               persistent libgphoto2 session, config tree,
     │                           bulb, live view, reconnect
     ├── network.py              hotspot / Wi-Fi switching for the Admin pane
+    ├── system.py               host health, restart, reboot, shutdown
     ├── sequencer.py            interval + script jobs on a worker thread
     ├── scripts.py              YAML script parser, validator, upload and interpreter
     ├── app.py                  Flask JSON API
@@ -550,6 +577,8 @@ curl -F 'file=@my-sequence.yaml' http://192.168.7.1:8080/api/scripts/upload
 curl -X POST http://192.168.7.1:8080/api/scripts/run \
   -H 'Content-Type: application/json' -d '{"filename":"star-trails.yaml"}'
 curl http://192.168.7.1:8080/api/status
+curl http://192.168.7.1:8080/api/system          # temperature, throttling, disk
+curl http://192.168.7.1:8080/api/logs            # recent service log
 curl http://192.168.7.1:8080/api/network
 curl -X POST http://192.168.7.1:8080/api/network/hotspot \
   -H 'Content-Type: application/json' -d '{"enabled":true,"revert_after":600}'

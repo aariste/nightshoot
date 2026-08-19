@@ -13,6 +13,7 @@ import threading
 
 from flask import Flask, jsonify, render_template, request, send_file
 
+from . import system
 from .camera import Camera, CameraError
 from .network import NetworkError, ap_profile, cancel_revert, client_is_on_hotspot
 from .network import set_hotspot as _set_hotspot
@@ -470,14 +471,55 @@ def api_network_cancel_revert():
     return jsonify({"ok": True})
 
 
+@app.get("/api/system")
+def api_system():
+    """Host health: temperature, uptime, memory, throttling, disk."""
+    return jsonify({"ok": True, **system.summary(STATE_DIR)})
+
+
+@app.get("/api/logs")
+def api_logs():
+    """Recent service log, so a failed night can be diagnosed from the phone."""
+    lines = max(10, min(500, int(request.args.get("lines", 120) or 120)))
+    try:
+        result = subprocess.run(
+            ["journalctl", "-u", "nightshoot", "-n", str(lines), "--no-pager"],
+            capture_output=True, text=True, timeout=10)
+        text = result.stdout or result.stderr
+    except (OSError, subprocess.SubprocessError) as exc:
+        text = f"could not read the journal: {exc}"
+    return jsonify({"ok": True, "text": text})
+
+
+@app.post("/api/restart")
+def api_restart():
+    """Restart the service without rebooting — the usual fix for a wedged USB."""
+    if sequencer.running:
+        return jsonify({"ok": False,
+                        "error": "stop the sequence before restarting"}), 409
+    sequencer.stop()
+    camera.disconnect()
+    threading.Timer(0.5, system.restart_service).start()
+    return jsonify({"ok": True})
+
+
+@app.post("/api/reboot")
+def api_reboot():
+    if sequencer.running:
+        return jsonify({"ok": False,
+                        "error": "stop the sequence before rebooting"}), 409
+    sequencer.stop()
+    camera.disconnect()
+    threading.Timer(1.0, system.reboot).start()
+    return jsonify({"ok": True})
+
+
 @app.post("/api/shutdown")
 def api_shutdown():
     """Clean power-down so the SD card survives being unplugged in the field."""
     sequencer.stop()
     camera.disconnect()
-    threading.Timer(
-        1.0, lambda: subprocess.run(["/sbin/shutdown", "-h", "now"], check=False)
-    ).start()
+    threading.Timer(1.0, system.shutdown).start()
     return jsonify({"ok": True})
 
 

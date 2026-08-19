@@ -73,6 +73,12 @@
       color:var(--value); font:inherit; font-size:14px; text-decoration:underline;
       letter-spacing:0; font-weight:400; cursor:pointer; }
   button.linkish:active { background:none; color:var(--fg); }
+  /* Group headings inside a panel, so one long section still scans quickly. */
+  h3.grp { font-size:11px; letter-spacing:2px; color:var(--dim); font-weight:400;
+      text-transform:uppercase; margin:18px 0 8px; padding-top:10px;
+      border-top:1px solid var(--line); }
+  h3.grp:first-child { margin-top:0; padding-top:0; border-top:none; }
+  button.ghost.danger { border-color:var(--danger); color:var(--danger); }
   textarea { width:100%; background:var(--bg); color:var(--fg); border:1px solid var(--line);
              border-radius:8px; padding:10px 9px; font:inherit; font-size:14px;
              line-height:1.4; resize:vertical; white-space:pre; overflow-wrap:normal;
@@ -289,6 +295,8 @@
   <details id="adminpanel">
     <summary>Admin <span class="tag" id="admintag"></span></summary>
     <div class="body">
+
+      <h3 class="grp">Network</h3>
       <div class="kv"><span>mode</span><span id="netmode">—</span></div>
       <div class="kv"><span>network</span><span id="netname">—</span></div>
       <div class="kv"><span>pi address</span><span id="netaddr">—</span></div>
@@ -297,9 +305,7 @@
         <span id="appass">
           <button class="linkish" id="showpass" onclick="revealPassword()">show</button>
         </span></div>
-
       <div class="warn" id="netwarn"></div>
-
       <div style="margin-top:10px"><label for="revertsel">SAFETY NET</label>
         <select id="revertsel">
           <option value="600">revert after 10 min if unreachable</option>
@@ -307,22 +313,43 @@
           <option value="1800">revert after 30 min</option>
           <option value="0">no revert — keep the hotspot on</option>
         </select></div>
-
       <button id="apbtn" onclick="toggleHotspot()">TURN HOTSPOT ON</button>
       <button class="ghost" id="cancelrevert" onclick="cancelRevert()"
               style="display:none">CANCEL SCHEDULED REVERT</button>
       <div class="hint" id="nethint"></div>
-    </div>
-  </details>
-</section>
 
-<section>
-  <details id="syspanel">
-    <summary>System</summary>
-    <div class="body">
+      <h3 class="grp">Pi health</h3>
+      <div class="kv"><span>cpu temperature</span><span id="systemp">—</span></div>
+      <div class="kv"><span>power &amp; throttling</span><span id="systhrottle">—</span></div>
+      <div class="kv"><span>sd card</span><span id="sysdisk">—</span></div>
+      <div class="kv"><span>memory</span><span id="sysmem">—</span></div>
+      <div class="kv"><span>load</span><span id="sysload">—</span></div>
+      <div class="kv"><span>uptime</span><span id="sysuptime">—</span></div>
+      <div class="kv"><span>service running for</span><span id="syssince">—</span></div>
+      <div class="warn" id="syswarn"></div>
+
+      <h3 class="grp">About</h3>
+      <div class="kv"><span>hostname</span><span id="syshost">—</span></div>
+      <div class="kv"><span>version</span><span id="sysver">—</span></div>
+      <div class="kv"><span>camera</span><span id="sysmodel">—</span></div>
+      <div class="kv"><span>pi clock</span><span id="systime">—</span></div>
+      <div class="hint">If the clock is wrong, "stop at" times and file
+        timestamps will be too. A Pi with no network loses the time on reboot.</div>
+
+      <h3 class="grp">Service log</h3>
+      <button class="ghost" id="logbtn" onclick="toggleServiceLog()">SHOW LOG</button>
+      <pre id="syslog" style="display:none">—</pre>
+
+      <h3 class="grp">Power</h3>
       <div class="hint">Always shut down before pulling power — an interrupted
         write can corrupt the SD card.</div>
-      <button class="danger" onclick="shutdown()">SHUT DOWN PI</button>
+      <button class="ghost" onclick="restartService()">RESTART SERVICE</button>
+      <div class="hint">Reconnects the camera without rebooting. Try this first
+        if the camera has stopped responding.</div>
+      <div class="row">
+        <button class="ghost danger" onclick="rebootPi()">REBOOT</button>
+        <button class="danger" onclick="shutdown()">SHUT DOWN</button>
+      </div>
     </div>
   </details>
 </section>
@@ -332,7 +359,7 @@
 <script>
 const $ = id => document.getElementById(id);
 const SETTINGS = ['shutterspeed','iso','aperture','imageformat'];
-const PANELS = ['lvpanel','scriptpanel','lastpanel','logpanel','adminpanel','syspanel'];
+const PANELS = ['lvpanel','scriptpanel','lastpanel','logpanel','adminpanel'];
 
 let paused = false, choicesLoaded = false, thumbStamp = 0;
 let dirty = new Set(), scriptIndex = {}, lvTimer = null;
@@ -461,7 +488,7 @@ function initPanels() {
       try { localStorage.setItem('nightshoot.panel.' + id, el.open ? '1' : '0'); } catch (e) {}
       // Streaming into a collapsed panel would drain the camera battery unseen.
       if (id === 'lvpanel' && !el.open) { $('lvon').value = '0'; setLiveview(); }
-      if (id === 'adminpanel' && el.open) loadNetwork();
+      if (id === 'adminpanel' && el.open) { loadNetwork(); loadSystem(); }
     });
   });
 }
@@ -859,6 +886,83 @@ async function revealPassword() {
                                    : (j.error || 'unavailable');
   } catch (e) { $('appass').textContent = 'no connection to the Pi'; }
 }
+
+// --- admin: pi health ------------------------------------------------------
+function duration(seconds) {
+  if (seconds == null) return '—';
+  const d = Math.floor(seconds / 86400), h = Math.floor(seconds % 86400 / 3600);
+  const m = Math.floor(seconds % 3600 / 60);
+  if (d) return `${d}d ${h}h`;
+  if (h) return `${h}h ${m}m`;
+  return `${m}m`;
+}
+async function loadSystem() {
+  let d;
+  try { d = await fetch('/api/system').then(r => r.json()); }
+  catch { return; }
+  if (!d.ok) return;
+
+  const warn = [];
+  const t = d.cpu_temp_c;
+  $('systemp').textContent = t == null ? '—' : t + ' °C';
+  // The Pi throttles hard at 80 °C; 70 is worth knowing about on a warm night.
+  if (t != null && t >= 70) warn.push(`CPU at ${t} °C — it will throttle above 80.`);
+
+  const th = d.throttling;
+  if (!th) $('systhrottle').textContent = 'not reported';
+  else if (th.ok) $('systhrottle').textContent = 'ok';
+  else {
+    $('systhrottle').textContent = th.flags.join(', ');
+    // Under-voltage is the single most common cause of mystery Pi failures.
+    if (th.flags.some(f => f.includes('under-voltage')))
+      warn.push('Under-voltage detected — use a better supply or cable.');
+  }
+
+  const disk = d.disk;
+  $('sysdisk').textContent = disk
+    ? `${disk.free_gb} GB free of ${disk.total_gb} GB` : '—';
+  if (disk && disk.free_gb < 1) warn.push('SD card almost full.');
+
+  const mem = d.memory;
+  $('sysmem').textContent = mem && mem.available_mb != null
+    ? `${mem.available_mb} MB free of ${mem.total_mb} MB` : '—';
+  $('sysload').textContent = d.load ? d.load.join('  ') : '—';
+  $('sysuptime').textContent = duration(d.uptime_s);
+  $('syssince').textContent = d.service_since
+    ? duration(Date.now() / 1000 - d.service_since) : '—';
+  $('syshost').textContent = d.hostname || '—';
+  $('sysver').textContent = d.version || '—';
+  $('systime').textContent = d.time ? `${d.time} ${d.timezone || ''}`.trim() : '—';
+  $('sysmodel').textContent = lastCam.model || (lastCam.connected ? 'connected' : '—');
+  $('syswarn').textContent = warn.join('  ·  ');
+}
+async function toggleServiceLog() {
+  const el = $('syslog');
+  const show = el.style.display === 'none';
+  el.style.display = show ? 'block' : 'none';
+  $('logbtn').textContent = show ? 'HIDE LOG' : 'SHOW LOG';
+  if (!show) return;
+  el.textContent = 'reading…';
+  try {
+    const j = await fetch('/api/logs?lines=120').then(r => r.json());
+    el.textContent = j.text || '(empty)';
+    el.scrollTop = el.scrollHeight;
+  } catch (e) { el.textContent = 'could not reach the Pi'; }
+}
+async function restartService() {
+  if (lastSeq.running) { toast('Stop the sequence first.', true); return; }
+  if (!confirm('Restart the NightShoot service? The camera will reconnect.')) return;
+  const j = await postJSON('/api/restart', {});
+  if (j.ok) toast('Restarting — the page will reconnect in a few seconds.');
+  else toast(j.error || 'could not restart', true);
+}
+async function rebootPi() {
+  if (lastSeq.running) { toast('Stop the sequence first.', true); return; }
+  if (!confirm('Reboot the Pi? This takes about a minute.')) return;
+  const j = await postJSON('/api/reboot', {});
+  if (j.ok) toast('Rebooting. Reconnect in about a minute.');
+  else toast(j.error || 'could not reboot', true);
+}
 async function postJSON(url, body) {
   try {
     const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'},
@@ -988,7 +1092,7 @@ async function refresh() {
 
   // Reading the network state shells out to nmcli, so poll it slowly and only
   // while the panel is actually open.
-  if ($('adminpanel').open && (netTick++ % 5) === 0) loadNetwork();
+  if ($('adminpanel').open && (netTick++ % 5) === 0) { loadNetwork(); loadSystem(); }
 }
 
 // Polling is paused while the page is hidden, so a phone in your pocket is not
@@ -1010,7 +1114,7 @@ bulbChanged();
 planSummary();
 updateApply();
 loadScripts();
-if ($('adminpanel').open) loadNetwork();
+if ($('adminpanel').open) { loadNetwork(); loadSystem(); }
 startPolling();
 </script>
 </body>
