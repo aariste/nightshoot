@@ -40,7 +40,7 @@ WIDGET_NAMES = [
 ]
 OTHER_CONSTANTS = [
     "GP_CAPTURE_IMAGE", "GP_FILE_TYPE_PREVIEW", "GP_FILE_TYPE_NORMAL",
-    "GP_EVENT_FILE_ADDED", "GP_EVENT_TIMEOUT", "GP_ERROR_IO",
+    "GP_EVENT_FILE_ADDED", "GP_EVENT_TIMEOUT", "GP_EVENT_UNKNOWN", "GP_ERROR_IO",
     "GP_ERROR_IO_USB_CLAIM", "GP_ERROR_IO_USB_FIND", "GP_ERROR_CAMERA_ERROR",
     "GP_ERROR_TIMEOUT", "GP_ERROR_MODEL_NOT_FOUND",
 ]
@@ -71,7 +71,8 @@ class FakeCameraState:
         }
         self.readonly = set()
         self.counter = 0
-        self.calls = {"config": 0, "preview": 0, "capture": 0, "storage": 0, "trigger": 0}
+        self.calls = {"config": 0, "preview": 0, "capture": 0, "storage": 0,
+                      "trigger": 0, "single_config": 0}
         # Modelled on a real Z50 over USB 2: a synchronous capture waits for the
         # file, a trigger does not.
         self.cost = {"config": 0.0, "preview": 0.0, "capture": 0.0, "trigger": 0.0}
@@ -82,6 +83,8 @@ class FakeCameraState:
         self.supports_trigger = True
         self.pending_files = []      # fired but not yet reported as written
         self.buffer_limit = 0        # 0 = unlimited; else error when full
+        self.event_noise = 0         # property-change chatter before the files
+        self.bulb_events = []        # (monotonic time, value) per bulb toggle
         self.model = "Nikon Z 50"        # libgphoto2 abilities: includes vendor
         self.camera_model = "Z 50"       # the 'cameramodel' widget: does not
         self.manufacturer = "Nikon Corporation"
@@ -130,6 +133,9 @@ def _build_module() -> types.ModuleType:
 
         def set_value(self, value):
             STATE.values[self._name] = value
+            if self._name == "bulb":
+                # Timestamped so tests can measure the real open duration.
+                STATE.bulb_events.append((_time.monotonic(), value))
             # Closing the shutter makes the camera write a file, exactly as a
             # real one does — whichever mechanism this body uses for bulb.
             closed = (self._name == "bulb" and not value) or (
@@ -214,7 +220,21 @@ def _build_module() -> types.ModuleType:
             STATE.counter += 1
             return CameraFilePath(f"DSC_{STATE.counter:04d}.NEF")
 
+        def get_single_config(self, name):
+            # Real Nikons handle single-widget reads/writes without walking the
+            # whole config tree — the cheap path bulb toggling depends on.
+            STATE.calls["single_config"] += 1
+            return Config().get_child_by_name(name)
+
+        def set_single_config(self, name, widget):
+            STATE.calls["single_config"] += 1
+
         def wait_for_event(self, timeout_ms):
+            # Nikon bodies pepper the queue with property-change events; tests
+            # can inject that chatter ahead of the file events.
+            if STATE.event_noise > 0:
+                STATE.event_noise -= 1
+                return (gp.GP_EVENT_UNKNOWN, None)
             # Files fired by trigger_capture surface here, as on a real camera.
             if STATE.pending_files:
                 return (gp.GP_EVENT_FILE_ADDED, STATE.pending_files.pop(0))
