@@ -105,17 +105,21 @@ class TestBurstCorrectness:
 
 
 class TestBufferPressure:
-    def test_backs_off_when_the_camera_buffer_fills(self, sequencer, camera_state,
-                                                    wait_for):
-        """A full buffer surfaces as an error; easing off lets it drain."""
+    def test_a_full_buffer_is_backpressure_not_an_error(self, sequencer, camera_state,
+                                                        wait_for):
+        """A refused trigger means the buffer is full; the loop waits for a
+        file to land and fires again — no error counted, no abort."""
         camera_state.buffer_limit = 3
         sequencer.start(Plan(frames=10, interval_s=0, start_delay_s=0))
         assert wait_for(lambda: not sequencer.running, timeout=90)
-        # It must not abort: a full buffer is normal, not a failure.
-        assert sequencer.status()["frames_done"] > 0
+        status = sequencer.status()
+        assert status["frames_done"] == 10
+        assert status["state"] == "done"
+        assert status["errors"] == 0, "buffer pressure was miscounted as errors"
 
     def test_gives_up_on_persistent_failure(self, sequencer, camera_state, wait_for):
         camera_state.supports_trigger = False   # trigger_capture now raises
+        sequencer.burst_stall_s = 0.5           # keep the test quick
         sequencer.start(Plan(frames=10, interval_s=0, start_delay_s=0,
                              max_consecutive_errors=3))
         assert wait_for(lambda: not sequencer.running, timeout=90)

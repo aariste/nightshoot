@@ -137,3 +137,43 @@ class TestBurstCollection:
         assert wait_for(lambda: not sequencer.running, timeout=60)
         assert sequencer.status()["frames_done"] == 10
         assert sequencer.status()["state"] == "done"
+
+
+class TestBurstBackpressure:
+    """Regression: a full buffer used to trigger a 0.5-5s error backoff, so a
+    long burst stuttered — fast shots, a stall, a couple more, another stall —
+    and enough refusals in a row aborted the run entirely."""
+
+    def test_a_full_buffer_does_not_stall_the_burst(self, sequencer, camera_state,
+                                                    wait_for):
+        # A tiny buffer forces constant backpressure. Frames land instantly in
+        # the fake, so the run should finish far faster than even one round of
+        # the old half-second backoff per refill.
+        camera_state.buffer_limit = 2
+        started = time.monotonic()
+        sequencer.start(Plan(frames=14, interval_s=0, start_delay_s=0))
+        assert wait_for(lambda: not sequencer.running, timeout=30)
+        elapsed = time.monotonic() - started
+        status = sequencer.status()
+        assert status["frames_done"] == 14
+        assert status["errors"] == 0
+        assert elapsed < 2.0, f"burst under buffer pressure stuttered: {elapsed:.2f}s"
+
+    def test_pacing_is_reported_once_not_as_errors(self, sequencer, camera_state,
+                                                   wait_for):
+        camera_state.buffer_limit = 2
+        sequencer.start(Plan(frames=8, interval_s=0, start_delay_s=0))
+        assert wait_for(lambda: not sequencer.running, timeout=30)
+        log = sequencer.status()["log"]
+        assert sum("pacing to the card" in line for line in log) == 1
+        assert not any("error" in line for line in log)
+
+    def test_no_progress_at_all_still_aborts(self, sequencer, camera_state, wait_for):
+        camera_state.supports_trigger = False
+        sequencer.burst_stall_s = 0.4
+        sequencer.start(Plan(frames=5, interval_s=0, start_delay_s=0,
+                             max_consecutive_errors=2))
+        assert wait_for(lambda: not sequencer.running, timeout=30)
+        status = sequencer.status()
+        assert status["state"] == "error"
+        assert status["frames_done"] == 0

@@ -399,17 +399,32 @@ class Sequencer:
 
     # --------------------------------------------------------------- burst job
 
+    #: How long a burst may go with no accepted trigger *and* no new file
+    #: before refused triggers count as real errors rather than backpressure.
+    #: Generous on purpose: a buffered RAW burst can take seconds to drain.
+    burst_stall_s = 10.0
+
     def _run_burst(self, plan: Plan) -> None:
         """Fire the shutter without waiting for each file to be written.
 
         The camera's own buffer becomes the limit rather than the PTP round
         trip. Files are collected from the event queue as they appear, so the
         frame count stays honest.
+
+        A refused trigger is not an error at full speed: it means the buffer
+        is full, and the camera will accept again as soon as a frame reaches
+        the card. Backing off a fixed half-second there turns a full buffer
+        into a stutter — burst, stall, burst, stall. Instead, wait for
+        evidence of drain (a new file event) and fire the moment space opens,
+        so a long burst settles at the card's sustained write speed. Only a
+        spell with no progress at all is treated as a real failure.
         """
         self._say("burst mode: firing without waiting for each file")
         self._set_state("exposing")
         consecutive = 0
         fired = 0
+        said_pacing = False
+        last_progress = time.monotonic()   # last accepted trigger or new file
         last_collect = time.monotonic()
 
         while not self._stop.is_set():
@@ -427,14 +442,29 @@ class Sequencer:
                 self.camera.trigger()
                 fired += 1
                 consecutive = 0
+                last_progress = time.monotonic()
             except CameraError as exc:
+                # Poll for a landed file — proof the buffer is draining and
+                # the wait that paces this loop while the camera is busy.
+                drained = self.camera.collect_new_files(timeout_ms=150, budget_s=0.3)
+                for path in drained:
+                    self._record(_TriggeredShot(path))
+                now = time.monotonic()
+                if drained:
+                    consecutive = 0
+                    last_progress = last_collect = now
+                if now - last_progress < self.burst_stall_s:
+                    if not said_pacing:
+                        said_pacing = True
+                        self._say("camera buffer full — pacing to the card's write speed")
+                    continue
                 consecutive += 1
                 if not self._note_error(exc, consecutive, plan.max_consecutive_errors):
                     self._set_state("error")
                     return self._finish("aborted after repeated capture errors", ok=False)
-                # A full buffer shows up as an error; easing off lets it drain.
                 if not self._sleep_for(min(5.0, 0.5 * consecutive)):
                     return self._finish("stopped during error backoff")
+                continue
 
             # Collecting is a USB event poll, so doing it after every trigger
             # caps the fire rate. A few times a second keeps the frame count
