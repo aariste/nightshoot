@@ -1,0 +1,38 @@
+name: Burst, bracket, burst
+description: >
+  Ten seconds flat out, a minute of brackets, then ten seconds flat out again.
+  A pattern for meteor showers or lightning, where you want maximum frames when
+  something happens and considered exposures in between.
+
+steps:
+  - message: "phase 1: burst"
+  - set:
+      imageformat: "JPEG Fine"
+      shutterspeed: "1/2000"
+      iso: "3200"
+  - burst: {seconds: 10}
+
+  - message: "phase 2: brackets"
+  # Changing format costs a PTP round trip and the camera may still be
+  # flushing the burst, so the first bracket can lag a second or two. Keep the
+  # format constant across phases if that matters to you.
+  - set:
+      imageformat: "NEF (Raw)"
+      iso: "800"
+  - repeat: forever
+    for: 60                 # a duration; 'until' takes a clock time instead
+    every: 10
+    steps:
+      - for_each:
+          setting: shutterspeed
+          values: ["1/60", "1/15", "4"]
+        steps:
+          - capture:
+
+  - message: "phase 3: burst"
+  - set:
+      imageformat: "JPEG Fine"
+      shutterspeed: "1/2000"
+      iso: "3200"
+  - burst: {seconds: 10}
+  - message: "done"

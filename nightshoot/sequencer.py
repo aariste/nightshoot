@@ -405,6 +405,20 @@ class Sequencer:
     burst_stall_s = 10.0
 
     def _run_burst(self, plan: Plan) -> None:
+        """Interval-mode burst: fire flat out until the plan says stop."""
+        outcome = self._burst_loop(
+            frames=plan.frames,
+            until_ts=plan.until_ts,
+            max_consecutive_errors=plan.max_consecutive_errors,
+        )
+        if outcome == "error":
+            self._set_state("error")
+            return self._finish("aborted after repeated capture errors", ok=False)
+        self._finish("burst complete" if outcome == "done" else "stopped by user")
+
+    def _burst_loop(self, frames: int = 0, until_ts: float | None = None,
+                    duration_s: float | None = None,
+                    max_consecutive_errors: int = 5) -> str:
         """Fire the shutter without waiting for each file to be written.
 
         The camera's own buffer becomes the limit rather than the PTP round
@@ -418,6 +432,9 @@ class Sequencer:
         evidence of drain (a new file event) and fire the moment space opens,
         so a long burst settles at the card's sustained write speed. Only a
         spell with no progress at all is treated as a real failure.
+
+        Returns "done", "stopped" or "error". Shared by interval bursts and the
+        script ``burst:`` command, so both behave identically.
         """
         self._say("burst mode: firing without waiting for each file")
         self._set_state("exposing")
@@ -426,16 +443,26 @@ class Sequencer:
         said_pacing = False
         last_progress = time.monotonic()   # last accepted trigger or new file
         last_collect = time.monotonic()
+        ends_at = (time.monotonic() + duration_s) if duration_s else None
+        # A script burst starts with frames already on the counter, so the
+        # drain target is relative to where this burst began.
+        started_at_frame = self.frames_done
+        outcome = "done"
 
         while not self._stop.is_set():
-            if plan.frames and fired >= plan.frames:
+            if frames and fired >= frames:
                 break
-            if plan.until_ts and time.time() >= plan.until_ts:
+            if until_ts and time.time() >= until_ts:
+                break
+            if ends_at and time.monotonic() >= ends_at:
                 break
             if self._pause.is_set():
                 self._set_state("paused")
                 time.sleep(0.2)
                 self._set_state("exposing")
+                # Pausing must not eat the burst's allotted time.
+                if ends_at:
+                    ends_at += 0.2
                 continue
 
             try:
@@ -459,11 +486,10 @@ class Sequencer:
                         self._say("camera buffer full — pacing to the card's write speed")
                     continue
                 consecutive += 1
-                if not self._note_error(exc, consecutive, plan.max_consecutive_errors):
-                    self._set_state("error")
-                    return self._finish("aborted after repeated capture errors", ok=False)
+                if not self._note_error(exc, consecutive, max_consecutive_errors):
+                    return "error"
                 if not self._sleep_for(min(5.0, 0.5 * consecutive)):
-                    return self._finish("stopped during error backoff")
+                    return "stopped"
                 continue
 
             # Collecting is a USB event poll, so doing it after every trigger
@@ -474,15 +500,18 @@ class Sequencer:
                     self._record(_TriggeredShot(path))
                 last_collect = time.monotonic()
 
+        if self._stop.is_set():
+            outcome = "stopped"
+
         # The last few frames are still being written when the loop ends.
+        target = started_at_frame + fired
         deadline = time.monotonic() + 20.0
-        while self.frames_done < fired and time.monotonic() < deadline:
+        while self.frames_done < target and time.monotonic() < deadline:
             for path in self.camera.collect_new_files(timeout_ms=200):
                 self._record(_TriggeredShot(path))
             if self._stop.is_set() and time.monotonic() > deadline - 15.0:
                 break
-
-        self._finish("burst complete" if not self._stop.is_set() else "stopped by user")
+        return outcome
 
     def _note_error(self, exc: Exception, consecutive: int, limit: int) -> bool:
         """Record a capture failure. False means give up."""
@@ -625,6 +654,30 @@ class _ScriptRuntime(scriptlib.Runtime):
     def apply_settings(self, settings: dict) -> None:
         for key, value in settings.items():
             self.seq.camera.set_setting(key, value)
+
+    def burst(self, seconds: float | None, frames: int | None) -> None:
+        """Fire flat out for a time or a frame count, then carry on.
+
+        Refused when the body cannot trigger, rather than silently degrading to
+        ordinary captures: a script asking for a burst wants the frame rate, and
+        quietly giving it something slower would be worse than saying so.
+        """
+        if not self.seq.camera.supports_trigger():
+            raise CameraError(
+                "this camera cannot fire without waiting for each file, so "
+                "'burst' is unavailable. Use 'repeat' with 'capture' instead."
+            )
+        self.check_stop()
+        outcome = self.seq._burst_loop(
+            frames=frames or 0,
+            duration_s=seconds,
+            max_consecutive_errors=self.MAX_CONSECUTIVE_ERRORS,
+        )
+        if outcome == "stopped":
+            raise Stopped()
+        if outcome == "error":
+            raise CameraError("burst aborted after repeated capture errors")
+        self.seq._set_state("waiting")
 
     def capture(self, bulb: float | None, download: bool) -> None:
         while True:

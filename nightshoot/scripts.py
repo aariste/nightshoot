@@ -28,6 +28,7 @@ from __future__ import annotations
 import datetime as dt
 import os
 import re
+import time
 from dataclasses import dataclass
 
 import yaml
@@ -40,9 +41,10 @@ COMMANDS: dict[str, set[str]] = {
     "message": set(),
     "set": set(),
     "capture": set(),
+    "burst": set(),
     "wait": set(),
     "wait_until": set(),
-    "repeat": {"steps", "every", "until"},
+    "repeat": {"steps", "every", "until", "for"},
     "for_each": {"steps"},
 }
 
@@ -159,6 +161,23 @@ def _validate_command(command: str, step: dict, at: str, depth: int) -> None:
         if "bulb" in value and not _is_positive_number(value["bulb"]):
             raise ScriptError(f"{at}: 'bulb' must be a positive number of seconds")
 
+    elif command == "burst":
+        if not isinstance(value, dict) or not value:
+            raise ScriptError(
+                f"{at}: 'burst' needs {{seconds: N}} or {{frames: N}}")
+        unknown = set(value) - {"seconds", "frames"}
+        if unknown:
+            raise ScriptError(f"{at}: unknown burst option(s) {sorted(unknown)}")
+        if "seconds" in value and "frames" in value:
+            raise ScriptError(
+                f"{at}: give 'burst' either seconds or frames, not both")
+        if "seconds" in value and not _is_positive_number(value["seconds"]):
+            raise ScriptError(f"{at}: 'burst.seconds' must be a positive number")
+        if "frames" in value:
+            count = value["frames"]
+            if not (isinstance(count, int) and not isinstance(count, bool) and count > 0):
+                raise ScriptError(f"{at}: 'burst.frames' must be a whole number above 0")
+
     elif command == "wait":
         if not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0:
             raise ScriptError(f"{at}: 'wait' must be a number of seconds")
@@ -174,6 +193,8 @@ def _validate_command(command: str, step: dict, at: str, depth: int) -> None:
             raise ScriptError(f"{at}: 'repeat' needs an indented 'steps:' block")
         if "every" in step and not _is_positive_number(step["every"]):
             raise ScriptError(f"{at}: 'every' must be a positive number of seconds")
+        if "for" in step and not _is_positive_number(step["for"]):
+            raise ScriptError(f"{at}: 'for' must be a positive number of seconds")
         if "until" in step:
             _parse_clock(step["until"], at)
         _validate(step["steps"], f"{at}.steps", depth + 1)
@@ -221,12 +242,17 @@ def estimate_frames(steps) -> int | None:
     for step in steps:
         if "capture" in step:
             total += 1
+        elif "burst" in step:
+            count = step["burst"].get("frames")
+            if not count:
+                return None          # a timed burst shoots an unknown number
+            total += count
         elif "repeat" in step:
             inner = estimate_frames(step["steps"])
             if inner is None:
                 return None
             count = step["repeat"]
-            if count == "forever" or "until" in step:
+            if count == "forever" or "until" in step or "for" in step:
                 return None if inner else 0
             total += inner * count
         elif "for_each" in step:
@@ -380,6 +406,8 @@ class Runtime:
     def sleep_until_monotonic(self, target: float) -> None: raise NotImplementedError
     def apply_settings(self, settings: dict) -> None: raise NotImplementedError
     def capture(self, bulb: float | None, download: bool) -> None: raise NotImplementedError
+    def burst(self, seconds: float | None, frames: int | None) -> None:
+        raise NotImplementedError
     def check_stop(self) -> None: raise NotImplementedError
 
 
@@ -389,8 +417,6 @@ def run(script: Script, rt: Runtime) -> None:
 
 
 def _run_steps(steps, env: dict, rt: Runtime) -> None:
-    import time
-
     for step in steps:
         rt.check_stop()
 
@@ -407,6 +433,15 @@ def _run_steps(steps, env: dict, rt: Runtime) -> None:
             bulb = options.get("bulb")
             rt.capture(bulb=float(bulb) if bulb else None,
                        download=bool(options.get("download", False)))
+
+        elif "burst" in step:
+            options = substitute(step["burst"], env)
+            seconds = options.get("seconds")
+            frames = options.get("frames")
+            rt.log("burst for {}".format(
+                f"{seconds}s" if seconds else f"{frames} frame(s)"))
+            rt.burst(seconds=float(seconds) if seconds else None,
+                     frames=int(frames) if frames else None)
 
         elif "wait" in step:
             rt.sleep(float(substitute(step["wait"], env)))
@@ -437,9 +472,19 @@ def _run_steps(steps, env: dict, rt: Runtime) -> None:
 
             index = 0
             started = time.monotonic()
+            # 'for' is a duration from the moment the loop starts, and is kept
+            # on the monotonic clock so an NTP step cannot cut it short.
+            duration = step.get("for")
+            ends_at = (started + float(substitute(duration, env))) if duration else None
+            if ends_at:
+                rt.log(f"looping for {substitute(duration, env)}s")
+
             while infinite or index < count:
                 if deadline and time.time() >= deadline:
                     rt.log("reached the loop's end time")
+                    break
+                if ends_at and time.monotonic() >= ends_at:
+                    rt.log("loop duration reached")
                     break
                 rt.check_stop()
                 _run_steps(step["steps"], dict(env, i=index + 1), rt)
@@ -447,4 +492,8 @@ def _run_steps(steps, env: dict, rt: Runtime) -> None:
                 if every and (infinite or index < count):
                     # Slot-aligned so the interval never drifts over a long
                     # night; monotonic so an NTP clock step cannot bend it.
-                    rt.sleep_until_monotonic(started + index * float(every))
+                    target = started + index * float(every)
+                    # Do not sleep past the end of the loop's own window.
+                    if ends_at and target >= ends_at:
+                        break
+                    rt.sleep_until_monotonic(target)

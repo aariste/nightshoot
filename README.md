@@ -318,6 +318,7 @@ anything on the Pi.
 |---|---|---|
 | `set` | `set: {iso: "800", shutterspeed: "25"}` | Same names as the Camera panel |
 | `capture` | `capture:` / `capture: {bulb: 240, download: true}` | `bulb` is seconds |
+| `burst` | `burst: {seconds: 10}` or `burst: {frames: 30}` | Fires flat out; see below |
 | `wait` | `wait: 15` | Seconds |
 | `wait_until` | `wait_until: "23:30"` | Next occurrence of that local time |
 | `message` | `message: "pass {{i}}"` | Writes to the on-screen log |
@@ -329,6 +330,55 @@ Modifiers on `repeat`:
 - `every: 28` — start each pass on a fixed cadence. Slot-aligned against the loop
   start, so a long night never accumulates drift the way `wait` does.
 - `until: "05:30"` — leave the loop at that local time.
+- `for: 60` — leave the loop after that many seconds. Use `for` for a stretch of
+  a run ("a minute of brackets") and `until` for a time of night ("stop at
+  dawn"). Both together is allowed; whichever comes first ends the loop.
+
+Numbers in a script are checked before the run starts, so `bulb`, `every`, `for`
+and the `burst` options must be literal numbers, not `{{variables}}`. You find
+out a script is wrong at your desk rather than in a field at 2 a.m.
+
+### Bursts inside a script
+
+`burst` is the script form of what the interval runner does when the interval is
+0: the shutter is fired without waiting for each file, so the camera's buffer
+rather than the USB round trip sets the pace. Give it either a duration or a
+frame count, not both.
+
+```yaml
+steps:
+  - set: {imageformat: "JPEG Fine", shutterspeed: "1/2000", iso: "3200"}
+  - burst: {seconds: 10}          # flat out for ten seconds
+
+  - set: {imageformat: "NEF (Raw)", iso: "800"}
+  - repeat: forever
+    for: 60                       # a minute of brackets
+    every: 10
+    steps:
+      - for_each: {setting: shutterspeed, values: ["1/60", "1/15", "4"]}
+        steps:
+          - capture:
+
+  - set: {imageformat: "JPEG Fine", shutterspeed: "1/2000", iso: "3200"}
+  - burst: {seconds: 10}          # and flat out again
+```
+
+That is `examples/scripts/burst-bracket-burst.yaml`, the pattern for meteor
+showers or lightning: maximum frames while something is happening, considered
+exposures in between.
+
+Worth knowing:
+
+- A `set:` cannot run *inside* a burst. Settings apply between phases, which is
+  the point — a mid-flight change would land on frames you did not intend it for.
+- There is no `bulb` and no `download` in a burst; both defeat the purpose.
+- A body that cannot fire without waiting for each file makes `burst` fail with
+  a clear message rather than quietly running slow captures instead.
+- Changing image format between phases costs a USB round trip, and the camera
+  may still be flushing the previous burst. If the first frame of the next phase
+  must be prompt, keep the format the same throughout.
+- A frame-counted burst adds to the script's estimated frame total; a timed one
+  cannot be predicted, so the estimate becomes "unknown".
 
 Variables: declare them under `vars:` and reference them as `{{name}}` anywhere.
 `repeat` binds `{{i}}` (1-based pass number) and `for_each` binds `{{value}}`
