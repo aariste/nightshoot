@@ -175,6 +175,20 @@ def _body() -> dict:
     return data
 
 
+@app.after_request
+def _no_cache(response):
+    """Nothing this API returns is ever safe to cache.
+
+    Without an explicit header a browser may serve a stale reply from its own
+    heuristics, which for a live control surface means showing yesterday's
+    state — or the previously selected script.
+    """
+    if request.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+    return response
+
+
 @app.errorhandler(BadRequest)
 def _bad_request(exc):
     return jsonify({"ok": False, "error": str(exc)}), 400

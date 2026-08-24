@@ -107,6 +107,21 @@ class TestScriptEndpoints:
     def test_traversal_is_blocked(self, client):
         assert client.get("/api/scripts/..%2f..%2fetc%2fpasswd").status_code in (400, 404)
 
+    def test_responses_are_not_cacheable(self, client, scripts_dir):
+        """A cached reply would show the previously selected script."""
+        (scripts_dir / "a.yaml").write_text(GOOD)
+        response = client.get("/api/scripts/a.yaml")
+        assert "no-store" in response.headers.get("Cache-Control", "")
+
+    def test_every_api_response_is_uncacheable(self, client):
+        for path in ("/api/status", "/api/scripts", "/api/system"):
+            response = client.get(path)
+            assert "no-store" in response.headers.get("Cache-Control", ""), path
+
+    def test_the_page_itself_is_still_cacheable(self, client):
+        """Only the API is no-store; the HTML may be cached normally."""
+        assert "no-store" not in client.get("/").headers.get("Cache-Control", "")
+
     def test_runs_a_script(self, client, scripts_dir, wait_for):
         from nightshoot import app as appmod
         (scripts_dir / "run.yaml").write_text("name: run\nsteps:\n - capture:\n - capture:\n")

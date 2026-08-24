@@ -692,13 +692,26 @@ function scriptPicked() {
     : (s.estimated_frames === null ? 'open-ended' : s.estimated_frames);
   if ($('scriptsrc').style.display !== 'none') showSource();
 }
+
+// Responses can arrive out of order — over the Pi's hotspot the first request
+// is often the slowest — so a stale reply must never overwrite a newer one.
+let srcRequest = 0;
 async function showSource() {
   const name = $('scriptsel').value;
+  const mine = ++srcRequest;
   if (!name) { $('scriptsrc').textContent = ''; return; }
+  // Never leave the previous script's source on screen while fetching.
+  $('scriptsrc').textContent = 'loading…';
+  let text;
   try {
     const d = await fetch('/api/scripts/' + encodeURIComponent(name)).then(r => r.json());
-    $('scriptsrc').textContent = d.source || d.error || '';
-  } catch (e) { $('scriptsrc').textContent = 'could not load the script'; }
+    text = d.source || d.error || '';
+  } catch (e) {
+    text = 'could not load the script';
+  }
+  // Ignore this reply if another request started, or the selection moved on.
+  if (mine !== srcRequest || $('scriptsel').value !== name) return;
+  $('scriptsrc').textContent = text;
 }
 function toggleSource() {
   const el = $('scriptsrc');
@@ -706,6 +719,7 @@ function toggleSource() {
   el.style.display = show ? 'block' : 'none';
   $('srcbtn').textContent = show ? 'HIDE SOURCE' : 'VIEW SOURCE';
   if (show) showSource();
+  else { srcRequest++; el.textContent = ''; }   // drop anything still in flight
 }
 function runScript() {
   const name = $('scriptsel').value;
