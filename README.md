@@ -66,22 +66,25 @@ sudo apt update && sudo apt full-upgrade -y && sudo reboot
 
 ## 3. Install NightShoot
 
-Copy this folder to the Pi and run the installer:
+Clone the repo onto the Pi and run the installer. If the repo is private, set up
+pull access first — see [Updating the Pi](#updating-the-pi) below.
 
 ```bash
-# from your laptop, in the directory that contains nightshoot/
-scp -r nightshoot <user>@nightshoot.local:~/
-
 # on the Pi
+git clone https://github.com/aariste/nightshoot.git ~/nightshoot
 cd ~/nightshoot
-sed -i 's/\r$//' install.sh          # only needed if you copied from Windows
-chmod +x install.sh
 sudo AP_SSID="NightShoot" AP_PASS="pick-a-good-one" ./install.sh
 sudo reboot
 ```
 
-> **`env: 'bash\r': No such file or directory`** means the script still has
-> Windows CRLF line endings. Run the `sed` line above (or `sudo apt install -y
+Copying with `scp -r nightshoot <user>@nightshoot.local:~/` works too, but then
+the Pi has no way to pull updates and no record of which version it is running.
+A clone is worth the two extra minutes — and it keeps the executable bits, so
+there is no `chmod` step.
+
+> **`env: 'bash\r': No such file or directory`** means the script has Windows
+> CRLF line endings — which happens when you copy from Windows rather than
+> clone. Fix with `sed -i 's/\r$//' install.sh` (or `sudo apt install -y
 > dos2unix && dos2unix install.sh`) and try again.
 
 The installer:
@@ -93,6 +96,58 @@ The installer:
 4. creates a venv at `/opt/nightshoot/venv` with Flask + `python-gphoto2`,
 5. enables the `nightshoot` systemd service (auto-restarts on crash, starts at boot),
 6. creates a WPA2 hotspot that only comes up when no known Wi-Fi is in range.
+
+### Updating the Pi
+
+Once the Pi can reach the repo, updating is one command:
+
+```bash
+cd ~/nightshoot && ./update.sh
+```
+
+`update.sh` refuses rather than guesses. It stops if a sequence is running
+(`--force` overrides), if the checkout has uncommitted changes, or if it has
+diverged from the remote — a silent merge there would hide work nobody is
+tracking. Otherwise it fast-forwards, reinstalls, restarts the service and
+checks the web UI answers. If the service fails to come back it prints the last
+30 journal lines instead of leaving you to find them.
+
+#### Pull access for a private repo
+
+Give the Pi a **deploy key**: an SSH key GitHub trusts for one repository only.
+Better than a personal access token here — it cannot touch your other repos, it
+never expires, and nothing secret ends up in a remote URL where `git remote -v`
+would print it for anyone looking over your shoulder.
+
+```bash
+# on the Pi, as your normal user — NOT with sudo
+cd ~/nightshoot
+./deploy-key.sh
+```
+
+The script generates the key, prints it, and waits while you paste it into
+`https://github.com/<owner>/<repo>/settings/keys/new`. **Leave "Allow write
+access" unchecked** — the Pi only ever reads. Then it verifies the key, points
+the checkout at the SSH remote and sets up branch tracking.
+
+Details worth knowing:
+
+- **Run it without `sudo`.** The key must belong to whoever runs `git pull`.
+  Under `sudo` it lands in `/root/.ssh` and resurfaces later as a puzzling
+  `Permission denied (publickey)`.
+- **No passphrase.** The Pi has to pull unattended with nobody there to type
+  one. The key is read-only and scoped to one repo, so a stolen SD card exposes
+  nothing but code.
+- **Host keys are pinned from `api.github.com/meta` over HTTPS**, not from
+  whatever `ssh-keyscan` is handed on first connection. Re-running the script
+  replaces rotated keys rather than leaving a stale one to fail months later.
+- **Port 22 blocked?** Common on hotel, campsite and some home networks. The
+  script notices, retries GitHub's port 443 endpoint, and makes that the default
+  if it works.
+- Set `REPO=owner/name ./deploy-key.sh` if you forked.
+
+To undo it: delete the key at `https://github.com/<owner>/<repo>/settings/keys`,
+then remove `~/.ssh/nightshoot_deploy*` and the marked block in `~/.ssh/config`.
 
 ---
 
@@ -596,6 +651,8 @@ with your phone's hotspot turned off.
 ```
 nightshoot/
 ├── install.sh                  one-shot Pi setup
+├── deploy-key.sh               give the Pi read-only pull access to this repo
+├── update.sh                   pull, reinstall, restart — with safety checks
 ├── hotspot-test.sh             safely test the field hotspot from home
 ├── pyproject.toml              packaging, pytest and ruff config
 ├── systemd/nightshoot.service  boot + auto-restart
