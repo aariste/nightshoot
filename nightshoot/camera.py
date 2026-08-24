@@ -212,6 +212,9 @@ class Camera:
         self._snapshot_cache: dict | None = None
         self._can_trigger: bool | None = None
         self._bulb_supported: bool | None = None
+        self._burst_limit: int | None = None
+        self._burst_probed = False
+        self._burst_number = 1
         self._manufacturer = ""
         self._vendor_warning: str | None = None
         self._shutter_s: float | None = None
@@ -250,6 +253,11 @@ class Camera:
                     self._manufacturer = self._read_manufacturer()
                     self._bulb_supported = None
                     self._can_trigger = None
+                    self._burst_limit = None
+                    self._burst_probed = False
+                    # A fresh session starts at the camera's own setting, and
+                    # we have not touched it yet.
+                    self._burst_number = 1
                     self._check_vendor()
                     log.info("connected to %s", self._model)
                     self._drain_events(500)
@@ -587,6 +595,13 @@ class Camera:
         """Apply the settings a night sequence depends on. Returns warnings."""
         warnings: list[str] = []
 
+        # A previous run that died mid-burst may have left BurstNumber high,
+        # which would silently turn every frame of this sequence into a burst.
+        # Assume nothing about what the last session left behind.
+        if self.burst_number_limit():
+            self._burst_number = 0      # force the write even if we think it's 1
+            self.reset_burst_number()
+
         # Vendors name these differently — Nikon says "Memory card", Canon may
         # offer "card" or "SDRAM" — so pick from what this body actually lists
         # rather than asserting one spelling.
@@ -683,6 +698,13 @@ class Camera:
         camera to make the file available, which is a full PTP round trip per
         frame. For bursts we only need the shutter to fire; files are collected
         afterwards from the event queue.
+
+        On Nikon "immediately" is relative. libgphoto2's Nikon path brackets
+        every capture with ``nikon_wait_busy``, which polls the body's
+        DeviceReady opcode every 100 ms until it goes idle — so one call costs
+        at least one poll interval, and a per-frame loop cannot beat roughly
+        one frame per 100 ms no matter how short the exposure. See
+        ``burst_number_limit`` for the way around that.
         """
         with self._lock:
             cam = self._require()
@@ -691,6 +713,68 @@ class Camera:
             except gp.GPhoto2Error as exc:
                 self._reconnect_if_fatal(exc)
                 raise CameraError(f"trigger failed: {exc}") from exc
+
+    def burst_number_limit(self) -> int | None:
+        """Most frames one trigger can produce, or None if unsupported.
+
+        Nikon exposes PTP's BurstNumber property. Set it to N, fire once, and
+        the camera runs its *own* continuous drive for N frames at the rate the
+        shutter button would give you — the buffer stays full and refreshing
+        rather than draining between shots.
+
+        This matters because ``trigger_capture`` blocks until the body reports
+        itself idle again, so firing frame by frame pays a device-ready poll per
+        frame. With BurstNumber that cost is paid once per burst instead of once
+        per frame, which is the difference between a stutter and a burst.
+        """
+        if self._burst_probed:
+            return self._burst_limit
+        self._burst_probed = True
+        if self._cam is None or not self._lock.acquire(timeout=1.0):
+            self._burst_probed = False
+            return None
+        try:
+            widget = self._find_widget(self._cam.get_config(), "burstnumber")
+            if widget is None or widget.get_readonly():
+                return None
+            if WIDGET_TYPE_NAMES.get(widget.get_type()) != "range":
+                return None
+            _low, high, _step = widget.get_range()
+            self._burst_limit = int(high)
+        except (gp.GPhoto2Error, AttributeError, TypeError, ValueError):
+            self._burst_limit = None
+        finally:
+            self._lock.release()
+        return self._burst_limit
+
+    def set_burst_number(self, count: int) -> None:
+        """Arm the camera to shoot ``count`` frames per trigger.
+
+        A no-op when the value is already set: every config write is a USB round
+        trip, and during a burst those are exactly what we are trying to avoid.
+        """
+        count = max(1, int(count))
+        if count == self._burst_number:
+            return
+        self.set_setting("burstnumber", count)
+        self._burst_number = count
+
+    def reset_burst_number(self) -> None:
+        """Put the camera back to one frame per trigger.
+
+        Essential rather than tidy: leaving BurstNumber above 1 would turn every
+        later single exposure — a test frame, the next interval sequence — into
+        an unwanted burst. Failures are swallowed because this runs on the way
+        out of a burst, where raising would mask whatever actually ended it.
+        """
+        if self._burst_number == 1:
+            return
+        try:
+            self.set_setting("burstnumber", 1)
+        except (CameraError, gp.GPhoto2Error) as exc:
+            log.warning("could not reset burstnumber: %s", exc)
+        finally:
+            self._burst_number = 1
 
     def collect_new_files(self, timeout_ms: int = 1, budget_s: float = 0.25) -> list:
         """Drain any files the camera has finished writing. Never blocks long.

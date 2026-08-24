@@ -404,6 +404,13 @@ class Sequencer:
     #: Generous on purpose: a buffered RAW burst can take seconds to drain.
     burst_stall_s = 10.0
 
+    #: Frames per native-burst chunk. One trigger with BurstNumber set blocks
+    #: until the whole chunk is written, so this is the granularity at which
+    #: stop, pause and the end of a timed burst can take effect. Small enough
+    #: to stay responsive, large enough that the per-chunk device-ready poll is
+    #: amortised over plenty of frames.
+    burst_chunk = 8
+
     def _run_burst(self, plan: Plan) -> None:
         """Interval-mode burst: fire flat out until the plan says stop."""
         outcome = self._burst_loop(
@@ -419,11 +426,155 @@ class Sequencer:
     def _burst_loop(self, frames: int = 0, until_ts: float | None = None,
                     duration_s: float | None = None,
                     max_consecutive_errors: int = 5) -> str:
-        """Fire the shutter without waiting for each file to be written.
+        """Fire as fast as the body will go, by whichever route it supports."""
+        limit = None
+        try:
+            limit = self.camera.burst_number_limit()
+        except CameraError:
+            limit = None
+        if limit and limit > 1:
+            try:
+                outcome = self._native_burst(frames, until_ts, duration_s,
+                                             max_consecutive_errors, limit)
+            finally:
+                # Leaving BurstNumber armed would turn the next single frame —
+                # a test shot, the next interval sequence — into a burst.
+                self.camera.reset_burst_number()
+            if outcome != "fallback":
+                return outcome
+        return self._trigger_burst(frames, until_ts, duration_s,
+                                   max_consecutive_errors)
 
-        The camera's own buffer becomes the limit rather than the PTP round
-        trip. Files are collected from the event queue as they appear, so the
-        frame count stays honest.
+    def _native_burst(self, frames: int, until_ts: float | None,
+                      duration_s: float | None, max_consecutive_errors: int,
+                      limit: int) -> str:
+        """Let the camera run its own continuous drive, a chunk at a time.
+
+        Firing frame by frame over PTP cannot reach the shutter-button rate:
+        libgphoto2 waits for the Nikon to report itself idle after every
+        capture, polling at 100 ms, so each frame costs a poll interval however
+        short the exposure. Setting BurstNumber and triggering once hands the
+        whole burst to the camera, which runs it at its native rate.
+
+        The cost is that the trigger blocks for the entire chunk, so chunks are
+        kept short: that is the granularity at which stop and the end of a timed
+        burst can take effect.
+        """
+        self._say("burst mode: letting the camera drive at its own rate")
+        self._set_state("exposing")
+        consecutive = 0
+        fired = 0
+        started_at_frame = self.frames_done
+        ends_at = (time.monotonic() + duration_s) if duration_s else None
+        # Seeded low so the first chunk is small: until a chunk has been timed
+        # there is no way to know how many frames fit in the time left, and
+        # overshooting a short burst is worse than starting cautiously.
+        rate = 0.0
+        outcome = "done"
+
+        while not self._stop.is_set():
+            if frames and fired >= frames:
+                break
+            if until_ts and time.time() >= until_ts:
+                break
+            if ends_at and time.monotonic() >= ends_at:
+                break
+            if self._pause.is_set():
+                self._set_state("paused")
+                time.sleep(0.2)
+                self._set_state("exposing")
+                if ends_at:
+                    ends_at += 0.2
+                continue
+
+            chunk = min(self.burst_chunk, limit)
+            if frames:
+                chunk = min(chunk, frames - fired)
+            if ends_at and rate > 0:
+                # Do not start a chunk that would run past the deadline.
+                fits = int((ends_at - time.monotonic()) * rate)
+                chunk = max(1, min(chunk, fits))
+            if chunk < 1:
+                break
+
+            began = time.monotonic()
+            try:
+                self.camera.set_burst_number(chunk)
+            except CameraError as exc:
+                if fired == 0:
+                    # The widget is there but will not take a value. Nothing has
+                    # been shot yet, so fall back rather than spend the night
+                    # retrying something this body plainly will not do.
+                    self._say(f"cannot arm a camera burst ({exc}) — "
+                              "falling back to firing frame by frame")
+                    return "fallback"
+                consecutive += 1
+                if not self._note_error(exc, consecutive, max_consecutive_errors):
+                    return "error"
+                if not self._sleep_for(min(5.0, 0.5 * consecutive)):
+                    return "stopped"
+                continue
+
+            try:
+                self.camera.trigger()
+            except CameraError as exc:
+                consecutive += 1
+                if not self._note_error(exc, consecutive, max_consecutive_errors):
+                    return "error"
+                if not self._sleep_for(min(5.0, 0.5 * consecutive)):
+                    return "stopped"
+                continue
+
+            consecutive = 0
+            fired += chunk
+            # The trigger returned, so the camera is idle again and the files
+            # are waiting in the event queue. A generous timeout here is free:
+            # there is nothing else to do until they are all counted.
+            self._drain(started_at_frame + fired, budget_s=5.0, timeout_ms=200)
+
+            elapsed = time.monotonic() - began
+            if elapsed > 0:
+                measured = chunk / elapsed
+                # Smoothed, because the first chunk of a burst is faster than
+                # the sustained rate once the camera's buffer is full.
+                rate = measured if rate == 0 else (rate * 0.5 + measured * 0.5)
+
+        if self._stop.is_set():
+            outcome = "stopped"
+        self._drain(started_at_frame + fired, budget_s=20.0, timeout_ms=200)
+        return outcome
+
+    def _drain(self, target: int, budget_s: float, quiet_s: float = 1.0,
+               timeout_ms: int = 200) -> None:
+        """Collect files until the frame count catches up.
+
+        An empty poll does not mean the camera is finished: a frame that has
+        just been shot is still on its way to the card, so giving up on the
+        first quiet moment loses it from the count. Instead keep asking until
+        the target is met, the budget runs out, or nothing has arrived for
+        ``quiet_s`` — which is the honest signal that there is no more to come.
+        """
+        deadline = time.monotonic() + budget_s
+        last_seen = time.monotonic()
+        while self.frames_done < target and time.monotonic() < deadline:
+            found = self.camera.collect_new_files(timeout_ms=timeout_ms)
+            for path in found:
+                self._record(_TriggeredShot(path))
+            now = time.monotonic()
+            if found:
+                last_seen = now
+            elif now - last_seen >= quiet_s:
+                break
+
+    def _trigger_burst(self, frames: int = 0, until_ts: float | None = None,
+                       duration_s: float | None = None,
+                       max_consecutive_errors: int = 5) -> str:
+        """Fire the shutter frame by frame, without waiting for each file.
+
+        The fallback for bodies with no BurstNumber property. Slower than a
+        native burst — libgphoto2 waits for the camera to report itself idle
+        after every capture — but it still beats a synchronous capture, which
+        additionally waits for the file to be fetched.
 
         A refused trigger is not an error at full speed: it means the buffer
         is full, and the camera will accept again as soon as a frame reaches
@@ -433,8 +584,7 @@ class Sequencer:
         so a long burst settles at the card's sustained write speed. Only a
         spell with no progress at all is treated as a real failure.
 
-        Returns "done", "stopped" or "error". Shared by interval bursts and the
-        script ``burst:`` command, so both behave identically.
+        Returns "done", "stopped" or "error".
         """
         self._say("burst mode: firing without waiting for each file")
         self._set_state("exposing")

@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time as _time
 import types
 
 import pytest
@@ -47,6 +48,15 @@ OTHER_CONSTANTS = [
 
 #: Widgets real drivers expose as on/off toggles rather than value lists.
 TOGGLE_WIDGETS = {"bulb", "viewfinder", "eosviewfinder", "liveview"}
+RANGE_WIDGETS = {"burstnumber"}
+
+
+class CameraFilePath:
+    """What libgphoto2 hands back for a file on the camera."""
+
+    def __init__(self, name):
+        self.folder = "/store_00010001/DCIM/100NZ_50"
+        self.name = name
 
 
 class FakeCameraState:
@@ -61,6 +71,7 @@ class FakeCameraState:
             "imageformat": "NEF (Raw)", "capturetarget": "Memory card",
             "expprogram": "M", "batterylevel": "84%", "bulb": 0,
             "longexpnr": "0", "focusmode": "Manual", "viewfinder": 0,
+            "burstnumber": 1,
         }
         self.choices = {
             "shutterspeed": list(Z50_SHUTTER),
@@ -84,17 +95,56 @@ class FakeCameraState:
         self.pending_files = []      # fired but not yet reported as written
         self.buffer_limit = 0        # 0 = unlimited; else error when full
         self.event_noise = 0         # property-change chatter before the files
+        # A real Nikon does not hand a file over the instant the shutter closes:
+        # it lands in the buffer and surfaces only once the card has taken it.
+        # 0 keeps the old instant behaviour for tests that do not care.
+        self.write_s = 0.0
+        # PTP's BurstNumber: set it to N and one trigger makes the camera shoot
+        # N frames at its own continuous rate. None means the body does not
+        # expose it, which is what sends the sequencer down the per-frame path.
+        self.burst_number_max = 65535
+        self.burst_number_readonly = False
+        # What one native-burst frame costs once the camera is driving itself.
+        self.burst_frame_s = 0.0
+        # While a burst is in flight a Nikon reports its changing buffer depth,
+        # so the event queue is a steady drip of property changes with files
+        # among them. A drain that only stops on a timeout never sees one.
+        self.chatter_per_s = 0.0
+        self._chatter_at = 0.0
         self.bulb_events = []        # (monotonic time, value) per bulb toggle
         self.model = "Nikon Z 50"        # libgphoto2 abilities: includes vendor
         self.camera_model = "Z 50"       # the 'cameramodel' widget: does not
         self.manufacturer = "Nikon Corporation"
+
+    def queue_file(self, name):
+        """Record a fired frame, ready for collection once the card has it."""
+        self.pending_files.append((_time.monotonic() + self.write_s,
+                                   CameraFilePath(name)))
+
+    def next_ready_file(self):
+        """Pop the oldest frame the card has finished writing, if any."""
+        now = _time.monotonic()
+        for index, (ready_at, path) in enumerate(self.pending_files):
+            if ready_at <= now:
+                del self.pending_files[index]
+                return path
+        return None
+
+    def due_chatter(self):
+        """True if the camera would emit a property-change event about now."""
+        if self.chatter_per_s <= 0:
+            return False
+        now = _time.monotonic()
+        if now - self._chatter_at >= 1.0 / self.chatter_per_s:
+            self._chatter_at = now
+            return True
+        return False
 
 
 STATE = FakeCameraState()
 
 
 def _build_module() -> types.ModuleType:
-    import time as _time
 
     gp = types.ModuleType("gphoto2")
     for index, name in enumerate(WIDGET_NAMES):
@@ -108,11 +158,6 @@ def _build_module() -> types.ModuleType:
             self.code = code
 
     gp.GPhoto2Error = GPhoto2Error
-
-    class CameraFilePath:
-        def __init__(self, name):
-            self.folder = "/store_00010001/DCIM/100NZ_50"
-            self.name = name
 
     class Widget:
         def __init__(self, name):
@@ -142,8 +187,7 @@ def _build_module() -> types.ModuleType:
                 self._name == "eosremoterelease" and str(value).startswith("Release"))
             if closed:
                 STATE.counter += 1
-                STATE.pending_files.append(
-                    CameraFilePath(f"DSC_{STATE.counter:04d}.NEF"))
+                STATE.queue_file(f"DSC_{STATE.counter:04d}.NEF")
 
         def get_readonly(self):
             return self._name in STATE.readonly
@@ -151,9 +195,16 @@ def _build_module() -> types.ModuleType:
         def get_type(self):
             if self._name in TOGGLE_WIDGETS:
                 return gp.GP_WIDGET_TOGGLE
+            if self._name in RANGE_WIDGETS:
+                return gp.GP_WIDGET_RANGE
             if self._name in STATE.choices:
                 return gp.GP_WIDGET_RADIO
             return gp.GP_WIDGET_TEXT
+
+        def get_range(self):
+            if self._name == "burstnumber":
+                return (1.0, float(STATE.burst_number_max or 1), 1.0)
+            return (0.0, 1.0, 1.0)
 
         def count_choices(self):
             return len(STATE.choices.get(self._name, []))
@@ -170,6 +221,10 @@ def _build_module() -> types.ModuleType:
                 return Widget("__manufacturer__")
             if name not in STATE.values:
                 raise GPhoto2Error(-1, f"no widget named {name}")
+            # A body that does not expose BurstNumber at all — the case that
+            # sends the sequencer down its per-frame fallback.
+            if name == "burstnumber" and STATE.burst_number_max is None:
+                raise GPhoto2Error(-1, "no widget named burstnumber")
             return Widget(name)
 
     class CameraFile:
@@ -235,9 +290,14 @@ def _build_module() -> types.ModuleType:
             if STATE.event_noise > 0:
                 STATE.event_noise -= 1
                 return (gp.GP_EVENT_UNKNOWN, None)
-            # Files fired by trigger_capture surface here, as on a real camera.
-            if STATE.pending_files:
-                return (gp.GP_EVENT_FILE_ADDED, STATE.pending_files.pop(0))
+            # Files fired by trigger_capture surface here, as on a real camera —
+            # but only once the card has actually taken them.
+            ready = STATE.next_ready_file()
+            if ready is not None:
+                return (gp.GP_EVENT_FILE_ADDED, ready)
+            # A steady drip of buffer-depth changes while a burst is in flight.
+            if STATE.due_chatter():
+                return (gp.GP_EVENT_UNKNOWN, None)
             _time.sleep(min(timeout_ms, 5) / 1000.0)
             return (gp.GP_EVENT_TIMEOUT, None)
 
@@ -247,9 +307,13 @@ def _build_module() -> types.ModuleType:
             if STATE.buffer_limit and len(STATE.pending_files) >= STATE.buffer_limit:
                 raise GPhoto2Error(-1, "camera buffer full")
             STATE.calls["trigger"] += 1
-            _time.sleep(STATE.cost["trigger"])
-            STATE.counter += 1
-            STATE.pending_files.append(CameraFilePath(f"DSC_{STATE.counter:04d}.NEF"))
+            # With BurstNumber armed the camera shoots that many frames itself,
+            # and libgphoto2 does not return until the whole burst is done.
+            count = int(STATE.values.get("burstnumber", 1) or 1)
+            _time.sleep(STATE.cost["trigger"] + STATE.burst_frame_s * count)
+            for _ in range(count):
+                STATE.counter += 1
+                STATE.queue_file(f"DSC_{STATE.counter:04d}.NEF")
 
         def file_get(self, folder, name, file_type):
             STATE.calls["preview"] += 1

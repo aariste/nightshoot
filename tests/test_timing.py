@@ -142,7 +142,16 @@ class TestBurstCollection:
 class TestBurstBackpressure:
     """Regression: a full buffer used to trigger a 0.5-5s error backoff, so a
     long burst stuttered — fast shots, a stall, a couple more, another stall —
-    and enough refusals in a row aborted the run entirely."""
+    and enough refusals in a row aborted the run entirely.
+
+    These pin the per-frame fallback, which is where backpressure is visible.
+    A body with BurstNumber hands the whole burst to the camera and never sees
+    a refused trigger, so it cannot exercise this.
+    """
+
+    @pytest.fixture(autouse=True)
+    def per_frame_path(self, camera_state):
+        camera_state.burst_number_max = None
 
     def test_a_full_buffer_does_not_stall_the_burst(self, sequencer, camera_state,
                                                     wait_for):

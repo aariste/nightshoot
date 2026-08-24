@@ -429,6 +429,8 @@ Worth knowing:
 - There is no `bulb` and no `download` in a burst; both defeat the purpose.
 - A body that cannot fire without waiting for each file makes `burst` fail with
   a clear message rather than quietly running slow captures instead.
+- Stop takes effect at a chunk boundary (8 frames), not instantly — the camera
+  is driving the burst itself and will not be interrupted mid-chunk.
 - Changing image format between phases costs a USB round trip, and the camera
   may still be flushing the previous burst. If the first frame of the next phase
   must be prompt, keep the format the same throughout.
@@ -510,24 +512,57 @@ lightning or anything that will not wait. The status panel shows the measured
 your body actually goes.
 
 With interval `0`, no bulb and no downloading, NightShoot switches to a **burst
-path** that fires the shutter with libgphoto2's `trigger_capture` and collects
-the files from the camera's event queue afterwards, rather than waiting for each
-file to be written before firing again. That removes a full PTP round trip per
+path** that hands the whole burst to the camera rather than firing frame by
 frame. The frame counter stays accurate — files are counted as the camera
 reports them, and the last few are drained after the final trigger.
+
+**How it works, and why the obvious approach is slow.** libgphoto2's
+`trigger_capture` sounds like fire-and-forget, but on Nikon it is not: the
+driver brackets every capture with `nikon_wait_busy`, which polls the body's
+DeviceReady opcode **every 100 ms** until it goes idle. So each frame costs at
+least one poll interval however short the exposure, and a tight loop of
+triggers gets refused with `DeviceBusy` in between — which is exactly what a
+stutter looks like: three fast frames, a stall, one more, a stall.
+
+The way round it is PTP's **BurstNumber** property (`0x5018`, exposed by
+libgphoto2 as `burstnumber`). Set it to N, fire *once*, and the camera runs its
+own continuous drive for N frames at the rate the shutter button would give
+you. The device-ready poll is then paid once per burst instead of once per
+frame. This was confirmed working on the Z50 by the reporter of
+[libgphoto2#968](https://github.com/gphoto/libgphoto2/issues/968), on the
+libgphoto2 maintainer's suggestion.
+
+NightShoot fires in **chunks of 8** rather than one enormous burst. A trigger
+blocks until the whole chunk is written, so the chunk size is the granularity
+at which stop, pause and the end of a timed burst can take effect — eight
+frames keeps that responsive while still amortising the poll. For a timed
+burst the chunk shrinks as the deadline approaches, so `burst: {seconds: 10}`
+does not overshoot by a whole chunk.
+
+Two things follow that are worth knowing:
+
+- **BurstNumber is reset to 1 when the burst ends** — on the way out of a
+  normal finish, a stop, or an error. Left armed, it would silently turn every
+  later single frame (a test shot, the next interval sequence) into a burst.
+  It is also cleared at the start of every run, in case a previous one died
+  mid-burst.
+- **A body that does not expose it still works**, on the old per-frame path.
+  Slower, but it shoots.
 
 NightShoot also keeps its own overhead out of the way: the shutter speed is read
 from a short-lived cache rather than re-queried every frame, and preview
 thumbnails are skipped entirely during a burst.
 
-**It will still not match holding the shutter button down.** That is a protocol
-limit, not a tuning problem. The camera's continuous-release drive mode runs
-entirely inside the camera; remote capture goes over USB PTP, which is
-request/response and is not exposed to the body's burst machinery
-([libgphoto2#968](https://github.com/gphoto/libgphoto2/issues/968)). Expect a few
-frames per second at best, against 11 fps for the Z50's own burst.
+**It will still not quite match holding the shutter button down**, because the
+files have to be reported over USB and the camera is doing that as well as
+shooting. But the gap is much smaller than a per-frame trigger loop, and the
+limit is now the card and the buffer rather than the protocol.
 
-What actually moves the needle after that is the camera:
+> An earlier version of this README claimed the per-frame rate was a hard
+> protocol limit. That was wrong — the limit was `nikon_wait_busy`, and
+> BurstNumber avoids it.
+
+What moves the needle after that is the camera:
 
 | Setting | Effect on burst rate |
 |---|---|
@@ -536,10 +571,6 @@ What actually moves the needle after that is the camera:
 | **Long Exposure NR off** | Otherwise the camera is busy for as long as the exposure after *every* frame. |
 | **High ISO NR off or low** | In-camera processing delays the next frame. |
 | **Manual focus** | No AF hunt between frames. |
-
-If you need the camera's true burst rate, use its own drive mode and pull the
-files off the card afterwards. NightShoot is for unattended sequences, and no
-gphoto2-based tool can beat this limit.
 
 The shipped `fast-burst.yaml` example is set up along these lines.
 
