@@ -1,6 +1,6 @@
 # NightShoot — Raspberry Pi night intervalometer for Nikon cameras
 
-[![CI](https://github.com/aariste/nightshoot/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/nightshoot/actions/workflows/ci.yml)
+[![CI](https://github.com/aariste/nightshoot/actions/workflows/ci.yml/badge.svg)](https://github.com/aariste/nightshoot/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 A headless Pi that drives a Nikon over USB with gphoto2 and is controlled from

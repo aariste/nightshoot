@@ -38,8 +38,8 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/OWNER/nightshoot"
-Issues = "https://github.com/OWNER/nightshoot/issues"
+Homepage = "https://github.com/aariste/nightshoot"
+Issues = "https://github.com/aariste/nightshoot/issues"
 
 [project.scripts]
 nightshoot = "nightshoot.app:main"
