@@ -22,6 +22,14 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
+      # The UI has no build step, but a couple of its functions are exercised
+      # by running them under Node. Installed explicitly so those tests always
+      # run: they skip when Node is missing, and a silent skip in CI is worse
+      # than no test at all.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
       # python-gphoto2 is deliberately not installed: it needs libgphoto2-dev
       # and a real camera adds nothing here. tests/conftest.py substitutes a
       # stub that mimics a Nikon Z50, including its shutter-speed spellings.
@@ -31,6 +39,9 @@ jobs:
           pip install "flask>=3.0" "PyYAML>=6.0" "pytest>=8.0" "pytest-timeout>=2.2"
 
       - name: Run tests
+        # Turns "node is missing so the UI tests were skipped" into a failure.
+        env:
+          NIGHTSHOOT_REQUIRE_NODE: "1"
         run: pytest tests -q
 
   lint:
@@ -52,8 +63,10 @@ jobs:
           sudo apt-get update && sudo apt-get install -y shellcheck
           bash -n install.sh
           bash -n hotspot-test.sh
+          bash -n deploy-key.sh
+          bash -n update.sh
           # Informational: the installer targets Raspberry Pi OS specifically.
-          shellcheck -S warning install.sh hotspot-test.sh || true
+          shellcheck -S warning install.sh hotspot-test.sh deploy-key.sh update.sh || true
 
   examples:
     runs-on: ubuntu-latest

@@ -366,6 +366,24 @@ let dirty = new Set(), scriptIndex = {}, lvTimer = null;
 let wasReachable = true, wakeLock = null, lastSeq = {}, cardFreeImages = null, netTick = 0;
 let lastCam = {};
 
+// --- log panes -------------------------------------------------------------
+// A log that follows the tail is what you want while a sequence runs, and
+// infuriating the moment you scroll up to read something: the next poll drags
+// you back down. So only follow when the view is already at the bottom, and
+// leave the scroll position alone otherwise.
+//
+// Rewriting textContent resets scrollTop to 0 even when the text has not
+// changed, so an unchanged log is left untouched entirely — otherwise every
+// poll would jump a scrolled-up reader back to the top.
+function updateLog(el, text) {
+  if (el.textContent === text) return;
+  // 4px of slack: sub-pixel line heights and zoom mean an element scrolled
+  // fully to the bottom does not always land exactly on the arithmetic.
+  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 4;
+  el.textContent = text;
+  if (atBottom) el.scrollTop = el.scrollHeight;
+}
+
 // --- theme -----------------------------------------------------------------
 // Stored per device, so it survives reloads, browser restarts and Pi reboots.
 function applyTheme(mode) {
@@ -1055,8 +1073,7 @@ async function refresh() {
   $('prog').style.width = seq.frames_total
     ? Math.min(100, 100 * seq.frames_done / seq.frames_total) + '%' : '0';
 
-  $('log').textContent = (seq.log || []).join('\n') || 'no activity yet';
-  $('log').scrollTop = $('log').scrollHeight;
+  updateLog($('log'), (seq.log || []).join('\n') || 'no activity yet');
 
   const warn = [];
   if (d.camera_error) warn.push(d.camera_error);
