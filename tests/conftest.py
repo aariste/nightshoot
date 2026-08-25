@@ -72,6 +72,7 @@ class FakeCameraState:
             "expprogram": "M", "batterylevel": "84%", "bulb": 0,
             "longexpnr": "0", "focusmode": "Manual", "viewfinder": 0,
             "burstnumber": 1, "capturemode": "Single Shot",
+            "highisonr": "Normal",
         }
         self.choices = {
             "shutterspeed": list(Z50_SHUTTER),
@@ -79,14 +80,16 @@ class FakeCameraState:
             "f-number": ["f/1.8", "f/2.8", "f/4"],
             "imageformat": ["JPEG Fine", "NEF (Raw)"],
             "capturetarget": ["Internal RAM", "Memory card"],
-            # As a Z body lists them: libgphoto2 leaves some values unlabelled.
+            "highisonr": ["Off", "Low", "Normal", "High"],
+            # Exactly as a Nikon Z lists them: libgphoto2 has no label for the
+            # vendor values, so Continuous High shows up only as its hex.
             "capturemode": ["Single Shot", "Burst", "Continuous Low Speed",
-                            "Continuous High Speed", "Unknown value 8019"],
+                            "Unknown value 8011", "Unknown value 8019"],
         }
         self.readonly = set()
         self.counter = 0
         self.calls = {"config": 0, "preview": 0, "capture": 0, "storage": 0,
-                      "trigger": 0, "single_config": 0}
+                      "trigger": 0, "single_config": 0, "set": 0}
         # Modelled on a real Z50 over USB 2: a synchronous capture waits for the
         # file, a trigger does not.
         self.cost = {"config": 0.0, "preview": 0.0, "capture": 0.0, "trigger": 0.0}
@@ -111,8 +114,16 @@ class FakeCameraState:
         self.burst_frame_s = 0.0
         # A camera left in single-shot fires the requested number of frames but
         # settles between each one, so a burst is only as fast as the drive mode
-        # allows. This is the multiplier applied when the mode is not continuous.
+        # allows. Per drive mode, as a multiplier on burst_frame_s: continuous
+        # high is the reference, continuous low is about half the rate, and
+        # single shot is slower still.
         self.single_shot_penalty = 1.0
+        self.drive_penalty = {
+            "unknown value 8011": 1.0,      # Nikon Z: continuous high
+            "continuous high speed": 1.0,
+            "burst": 1.6,
+            "continuous low speed": 2.2,
+        }
         # How many frames the camera can hold before the shutter has to wait for
         # the card. This is what the buffer indicator counts down. 0 = unlimited,
         # which keeps the simple tests simple.
@@ -122,6 +133,15 @@ class FakeCameraState:
         # the buffer, and why a burst only slows once the buffer fills.
         self.card_write_s = 0.0
         self._card_free_at = 0.0     # when the card finishes what it has queued
+        # libgphoto2 waits for the body to report itself ready *before* firing,
+        # as well as after. If a Nikon counts "still flushing the buffer" as
+        # busy, then every extra trigger in a burst is an extra wait for the
+        # card to catch up — which is the hidden cost of chunking. Unproven for
+        # the Z50, so off by default and used to measure the worst case.
+        self.flush_gates_trigger = False
+        # What noise reduction adds to every frame when it is left on.
+        self.longexpnr_cost = 0.0
+        self.highisonr_cost = 0.0
         # While a burst is in flight a Nikon reports its changing buffer depth,
         # so the event queue is a steady drip of property changes with files
         # among them. A drain that only stops on a timeout never sees one.
@@ -220,6 +240,7 @@ def _build_module() -> types.ModuleType:
             return STATE.values[self._name]
 
         def set_value(self, value):
+            STATE.calls["set"] += 1
             STATE.values[self._name] = value
             if self._name == "bulb":
                 # Timestamped so tests can measure the real open duration.
@@ -350,16 +371,26 @@ def _build_module() -> types.ModuleType:
             if STATE.buffer_limit and len(STATE.pending_files) >= STATE.buffer_limit:
                 raise GPhoto2Error(-1, "camera buffer full")
             STATE.calls["trigger"] += 1
+            _time.sleep(STATE.cost["trigger"])
+            if STATE.flush_gates_trigger:
+                # The pre-fire readiness check, finding the camera still busy
+                # writing the previous chunk.
+                while STATE.buffer_used():
+                    _time.sleep(0.01)
             # With BurstNumber armed the camera shoots that many frames itself,
             # and libgphoto2 does not return until the whole burst is done.
             count = int(STATE.values.get("burstnumber", 1) or 1)
-            _time.sleep(STATE.cost["trigger"])
             # Single-shot cadence is slower than continuous, however many frames
-            # BurstNumber asks for.
+            # BurstNumber asks for — and the continuous modes differ from each
+            # other too, which is the whole reason the fastest one is chosen.
             mode = str(STATE.values.get("capturemode", "")).lower()
-            continuous = "continuous" in mode or "burst" in mode
-            per_frame = STATE.burst_frame_s * (
-                1.0 if continuous else STATE.single_shot_penalty)
+            penalty = STATE.drive_penalty.get(mode, STATE.single_shot_penalty)
+            per_frame = STATE.burst_frame_s * penalty
+            # Noise reduction keeps the camera busy after every frame.
+            if str(STATE.values.get("longexpnr", "0")).lower() in ("1", "on", "true"):
+                per_frame += STATE.longexpnr_cost
+            if str(STATE.values.get("highisonr", "Off")).lower() != "off":
+                per_frame += STATE.highisonr_cost
             for _ in range(count):
                 # The shutter runs at its own cadence until the buffer fills,
                 # then waits for the card — which is what makes a real burst

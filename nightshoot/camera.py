@@ -39,6 +39,7 @@ CONFIG_ALIASES = {
     "batterylevel": ["batterylevel"],
     "focusmode": ["focusmode", "focusmode2"],
     "longexpnr": ["longexpnr", "longexposurenoisereduction"],
+    "highisonr": ["highisonr", "highisonoisereduction", "noisereduction"],
     "viewfinder": ["viewfinder"],
     # The drive/release mode (PTP StillCaptureMode). Distinct from
     # "exposuremode" above, which is the P/S/A/M dial.
@@ -47,14 +48,35 @@ CONFIG_ALIASES = {
 }
 
 #: Preference order for the drive mode used during a burst, matched against
-#: whatever the body actually offers. Continuous-high first because that is the
-#: rate the shutter button gives you; "Burst" next because libgphoto2's own
-#: Nikon capture path treats StillCaptureMode 2 as the mode that pairs with
-#: BurstNumber; continuous-low last as better than nothing.
+#: whatever the body actually offers.
+#:
+#: The awkward part is that libgphoto2 does not label Nikon's vendor values on Z
+#: bodies: Continuous High shows up as "Unknown value 8011" rather than by name,
+#: so matching on words alone finds Continuous Low (0x8010, roughly half the
+#: rate) or the generic PTP "Burst" and stops there. The raw values are matched
+#: too, ahead of those, because on a Z body they are the fast one.
+#:
+#: Each entry is a tuple of substrings that must all appear in the choice,
+#: lowercased.
 BURST_RELEASE_PREFERENCE = (
-    ("continuous", "high"),
-    ("burst",),
-    ("continuous",),
+    ("continuous", "high"),   # labelled properly on some bodies
+    ("8011",),                # Nikon Z: Continuous High, left unlabelled
+    ("burst",),               # generic PTP burst; what libgphoto2 pairs with
+                              # BurstNumber in its own Nikon capture path
+    ("continuous",),          # Continuous Low: better than single shot
+)
+
+#: Settings that cost time per frame and nothing else, turned off for the
+#: duration of a burst and put back afterwards. Values are the substrings that
+#: identify an "off" choice, tried in order; a toggle widget just gets 0.
+BURST_SPEED_OVERRIDES = (
+    # Noise reduction runs after each frame and blocks the next one. Long
+    # Exposure NR can double the cycle time on its own.
+    ("longexpnr", ("off",), 0),
+    ("highisonr", ("off",), 0),
+    # Live view competes for the same USB pipe and the same processor the
+    # camera needs for shooting and writing.
+    ("viewfinder", (), 0),
 )
 
 #: Set NIGHTSHOOT_ALLOW_ANY=1 to try a non-Nikon body anyway. Nothing is
@@ -232,6 +254,7 @@ class Camera:
         self._burst_number = 1
         self._release_mode_saved = None
         self._release_mode_applied = None
+        self._speed_saved: dict = {}
         self._manufacturer = ""
         self._vendor_warning: str | None = None
         self._shutter_s: float | None = None
@@ -277,6 +300,8 @@ class Camera:
                     self._burst_number = 1
                     self._release_mode_saved = None
                     self._release_mode_applied = None
+                    # A new session cannot restore what the old one saved.
+                    self._speed_saved = {}
                     self._check_vendor()
                     log.info("connected to %s", self._model)
                     self._drain_events(500)
@@ -856,6 +881,63 @@ class Camera:
             self.set_setting("releasemode", previous)
         except (CameraError, gp.GPhoto2Error) as exc:
             log.warning("could not restore the drive mode: %s", exc)
+
+    def _off_value(self, key: str, wanted, fallback):
+        """The value on this widget that means "off".
+
+        A radio or menu widget has to be given one of its own choices, so the
+        wanted words are matched against them. A toggle or plain-value widget
+        has no choices to pick from and takes the raw fallback instead.
+        """
+        choices = self.get_choices(key)
+        if not choices:
+            return fallback
+        for candidate in wanted:
+            for choice in choices:
+                if str(candidate).lower() == str(choice).lower():
+                    return choice
+            for choice in choices:
+                if str(candidate).lower() in str(choice).lower():
+                    return choice
+        return None
+
+    def apply_speed_overrides(self) -> list[str]:
+        """Turn off everything that costs time per frame. Returns what changed.
+
+        Noise reduction and live view do not change what the burst is *of* —
+        they only make the camera busy between frames — so a run asking for
+        maximum speed can have them off and put back afterwards. Anything that
+        would change the picture itself (image format above all) is left alone;
+        that is the photographer's call, not ours.
+        """
+        changed = []
+        for key, wanted, fallback in BURST_SPEED_OVERRIDES:
+            try:
+                current = self.get_setting(key)
+            except (CameraError, gp.GPhoto2Error):
+                continue
+            if current is None:
+                continue
+            target = self._off_value(key, wanted, fallback)
+            if target is None or str(current).lower() == str(target).lower():
+                continue
+            try:
+                self.set_setting(key, target)
+            except (CameraError, gp.GPhoto2Error) as exc:
+                log.debug("could not override %s: %s", key, exc)
+                continue
+            self._speed_saved[key] = current
+            changed.append(key)
+        return changed
+
+    def restore_speed_overrides(self) -> None:
+        """Put everything apply_speed_overrides touched back."""
+        while self._speed_saved:
+            key, value = self._speed_saved.popitem()
+            try:
+                self.set_setting(key, value)
+            except (CameraError, gp.GPhoto2Error) as exc:
+                log.warning("could not restore %s: %s", key, exc)
 
     def collect_new_files(self, timeout_ms: int = 1, budget_s: float = 0.25) -> list:
         """Drain any files the camera has finished writing. Never blocks long.

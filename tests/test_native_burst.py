@@ -137,13 +137,28 @@ class TestDriveMode:
     does not match holding the button down.
     """
 
-    def test_prefers_continuous_high(self, camera):
+    def test_prefers_continuous_high_even_when_unlabelled(self, camera):
+        """libgphoto2 has no label for Nikon's continuous-high on Z bodies.
+
+        It appears only as its hex value, so a name-only search finds
+        Continuous Low — about half the rate — and stops there.
+        """
+        assert camera.burst_release_choice() == "Unknown value 8011"
+
+    def test_prefers_a_proper_label_when_there_is_one(self, camera, camera_state):
+        camera_state.choices["capturemode"] = ["Single Shot", "Burst",
+                                               "Continuous High Speed"]
         assert camera.burst_release_choice() == "Continuous High Speed"
 
     def test_falls_back_to_burst(self, camera, camera_state):
-        camera_state.choices["capturemode"] = ["Single Shot", "Burst",
-                                               "Unknown value 8011"]
+        camera_state.choices["capturemode"] = ["Single Shot", "Burst"]
         assert camera.burst_release_choice() == "Burst"
+
+    def test_prefers_high_over_burst_and_low(self, camera, camera_state):
+        camera_state.choices["capturemode"] = ["Single Shot", "Burst",
+                                               "Continuous Low Speed",
+                                               "Unknown value 8011"]
+        assert camera.burst_release_choice() == "Unknown value 8011"
 
     def test_falls_back_to_any_continuous(self, camera, camera_state):
         camera_state.choices["capturemode"] = ["Single Shot",
@@ -160,7 +175,7 @@ class TestDriveMode:
         sequencer.start(Plan(frames=8, interval_s=0, start_delay_s=0))
         assert wait_for(lambda: not sequencer.running, timeout=60)
 
-        assert any("Continuous High Speed" in line
+        assert any("Unknown value 8011" in line
                    for line in sequencer.status()["log"]), \
             "the drive mode change was not reported"
         # And put back, or the user's next single frame fires a burst.
@@ -234,6 +249,118 @@ class TestDriveMode:
         assert with_mode < without * 0.6, (
             f"continuous drive {with_mode:.2f}s was not clearly faster than "
             f"single-shot {without:.2f}s")
+
+
+class TestSpeedOverrides:
+    """Things that cost time per frame and nothing else are turned off.
+
+    Noise reduction and live view do not change what the burst is *of*; they
+    only keep the camera busy between frames. The image format does change it,
+    so that stays the photographer's call.
+    """
+
+    def test_turns_off_long_exposure_nr(self, camera, camera_state):
+        camera_state.values["longexpnr"] = "1"
+        assert "longexpnr" in camera.apply_speed_overrides()
+        # A text widget is written as text, a toggle as a number; either way
+        # the camera ends up with it off.
+        assert str(camera_state.values["longexpnr"]) == "0"
+
+    def test_turns_off_high_iso_nr(self, camera, camera_state):
+        camera_state.values["highisonr"] = "Normal"
+        assert "highisonr" in camera.apply_speed_overrides()
+        assert camera_state.values["highisonr"] == "Off"
+
+    def test_turns_off_live_view(self, camera, camera_state):
+        camera_state.values["viewfinder"] = 1
+        assert "viewfinder" in camera.apply_speed_overrides()
+        assert camera_state.values["viewfinder"] == 0
+
+    def test_leaves_settings_already_off_alone(self, camera, camera_state):
+        """Every write is a USB round trip, which is what a burst cannot spare."""
+        camera_state.values["longexpnr"] = 0
+        camera_state.values["highisonr"] = "Off"
+        camera_state.values["viewfinder"] = 0
+        before = camera_state.calls["set"]
+        assert camera.apply_speed_overrides() == []
+        assert camera_state.calls["set"] == before, "wrote for no reason"
+
+    def test_never_touches_the_image_format(self, camera, camera_state):
+        camera_state.values["imageformat"] = "NEF (Raw)"
+        camera.apply_speed_overrides()
+        assert camera_state.values["imageformat"] == "NEF (Raw)"
+
+    def test_everything_is_restored(self, camera, camera_state):
+        camera_state.values["longexpnr"] = "1"
+        camera_state.values["highisonr"] = "Normal"
+        camera_state.values["viewfinder"] = 1
+        camera.apply_speed_overrides()
+        camera.restore_speed_overrides()
+        assert camera_state.values["longexpnr"] == "1"
+        assert camera_state.values["highisonr"] == "Normal"
+        assert camera_state.values["viewfinder"] == 1
+
+    def test_a_missing_widget_is_not_fatal(self, camera, camera_state):
+        del camera_state.values["highisonr"]
+        camera_state.values["longexpnr"] = "1"
+        assert "longexpnr" in camera.apply_speed_overrides()
+
+    def test_restored_after_a_burst(self, sequencer, camera_state, wait_for):
+        camera_state.values["longexpnr"] = "1"
+        sequencer.start(Plan(frames=8, interval_s=0, start_delay_s=0))
+        assert wait_for(lambda: not sequencer.running, timeout=60)
+        assert camera_state.values["longexpnr"] == "1"
+
+    def test_restored_after_a_stop(self, sequencer, camera_state, wait_for):
+        camera_state.values["longexpnr"] = "1"
+        camera_state.burst_frame_s = 0.02
+        sequencer.start(Plan(frames=0, interval_s=0, start_delay_s=0))
+        assert wait_for(lambda: sequencer.status()["frames_done"] > 0, timeout=60)
+        sequencer.stop()
+        assert wait_for(lambda: not sequencer.running, timeout=60)
+        assert camera_state.values["longexpnr"] == "1"
+
+    def test_they_make_the_burst_faster(self, sequencer, camera, camera_state,
+                                        wait_for, monkeypatch):
+        def run(overrides):
+            camera_state.reset()
+            camera_state.burst_frame_s = 0.01
+            camera_state.longexpnr_cost = 0.03
+            camera_state.values["longexpnr"] = "1"
+            camera._burst_probed = False
+            camera._burst_limit = None
+            camera._burst_number = 1
+            camera._release_mode_saved = None
+            camera._speed_saved = {}
+            if not overrides:
+                monkeypatch.setattr(camera, "apply_speed_overrides", lambda: [])
+            started = time.monotonic()
+            sequencer.start(Plan(frames=32, interval_s=0, start_delay_s=0))
+            assert wait_for(lambda: not sequencer.running, timeout=120)
+            assert sequencer.status()["frames_done"] == 32
+            return time.monotonic() - started
+
+        without = run(False)
+        monkeypatch.undo()
+        with_them = run(True)
+        assert with_them < without * 0.8, (
+            f"overrides {with_them:.2f}s were not clearly faster than "
+            f"{without:.2f}s without")
+
+    def test_raw_is_flagged_but_not_changed(self, sequencer, camera_state,
+                                            wait_for):
+        camera_state.values["imageformat"] = "NEF (Raw)"
+        sequencer.start(Plan(frames=4, interval_s=0, start_delay_s=0))
+        assert wait_for(lambda: not sequencer.running, timeout=60)
+        assert any("JPEG would be" in line for line in sequencer.status()["log"])
+        assert camera_state.values["imageformat"] == "NEF (Raw)"
+
+    def test_jpeg_is_not_flagged(self, sequencer, camera_state, wait_for):
+        camera_state.values["imageformat"] = "JPEG Fine"
+        sequencer.start(Plan(frames=4, interval_s=0, start_delay_s=0))
+        assert wait_for(lambda: not sequencer.running, timeout=60)
+        assert not any("JPEG would be" in line
+                       for line in sequencer.status()["log"])
 
 
 class TestTheCameraIsLeftUsable:

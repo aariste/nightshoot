@@ -533,30 +533,47 @@ libgphoto2 maintainer's suggestion.
 
 **BurstNumber alone is not enough**, which is the part that is easy to miss. It
 says *how many* frames a trigger produces; the camera's **drive mode**
-(`StillCaptureMode`, `0x5013`, the `capturemode` widget) says *how fast* they
+(`StillCaptureMode`, `0x5013`, the `capturemode` widget) says how fast they
 come. A body left in Single Shot will obediently fire the requested number of
 frames with full between-shot settling — better than one trigger per frame, but
-nothing like continuous release. NightShoot therefore also switches the drive
-mode to the fastest continuous option the body lists, preferring
-*Continuous High Speed* → *Burst* → any *Continuous* mode, and puts it back
-afterwards. The log line says which one it picked.
+nothing like continuous release.
 
-Three more things follow that are worth knowing:
+Picking the right drive mode has a trap in it. **libgphoto2 does not label
+Nikon's continuous-high on Z bodies**: it appears as `Unknown value 8011`, not
+by name. Searching the choices for something that reads like "continuous high"
+therefore finds *Continuous Low* — roughly half the rate — and stops there.
+NightShoot matches the raw value too, preferring a properly labelled
+Continuous High, then `8011`, then the generic PTP *Burst*, then any
+*Continuous*. The log line says which one it picked; if yours reads
+`Continuous Low Speed` your body lists something we have not accounted for.
+
+It also turns off, for the duration of the burst only, the things that cost
+time per frame and change nothing else: Long Exposure NR, High ISO NR, and live
+view. All are restored afterwards.
+
+What it deliberately does **not** touch is the **image format**, even though
+that is the single biggest lever — a Z50 NEF is ~25 MB and fills the buffer in
+a few frames. What the pictures *are* is the photographer's decision, so a RAW
+burst gets a line in the log pointing out that JPEG would be markedly faster,
+and is otherwise left alone.
+
+Three more things worth knowing:
 
 - **Chunking is by time, not frame count.** A trigger blocks until its whole
   chunk is shot and libgphoto2 exposes no way to abort one
   (`PTP_OC_NIKON_TerminateCapture` exists in the protocol but no libgphoto2
   function calls it), so chunk length *is* the stop-latency budget. NightShoot
-  targets ~2 seconds per chunk, sized from the rate it measured on the previous
-  chunk, with a hard cap so a bad estimate cannot produce an uninterruptible
-  burst.
+  targets ~2 seconds, sized from the rate measured on the previous chunk, with
+  a hard cap so a bad estimate cannot produce an uninterruptible burst. Longer
+  chunks were measured against a simulated Z50 and bought about 4% — worth far
+  less than being able to stop.
 - **Files are not waited for between chunks.** Collecting only what has already
   landed and moving straight to the next chunk keeps the camera's buffer topped
   up. Waiting for every file first let the buffer drain to empty while the
   shutter sat idle — worth several fps on its own.
-- **BurstNumber and the drive mode are both restored when the burst ends** — on
-  a normal finish, a stop, or an error. Left set, the next single frame (a test
-  shot, the next interval sequence) would fire a burst. BurstNumber is also
+- **Everything is restored when the burst ends** — on a normal finish, a stop,
+  or an error. Left set, the next single frame (a test shot, the next interval
+  sequence) would fire a burst with noise reduction off. BurstNumber is also
   cleared at the start of every run, in case a previous one died mid-burst.
 
 A body that exposes none of this still works, on the old per-frame path.
@@ -573,15 +590,15 @@ the remaining gap is the card and the buffer rather than the protocol.
 > protocol limit. That was wrong — the limit was `nikon_wait_busy`, and
 > BurstNumber plus a continuous drive mode avoids most of it.
 
-What moves the needle after that is the camera:
+What moves the needle after that is the camera, and the first row is now the
+only one NightShoot leaves to you:
 
 | Setting | Effect on burst rate |
 |---|---|
-| **JPEG instead of RAW** | The single biggest win. A Z50 NEF is ~25 MB; the buffer fills in a few frames and then every shot waits on the card. |
+| **JPEG instead of RAW** | The single biggest win, and yours to make. A Z50 NEF is ~25 MB; the buffer fills in a few frames and then every shot waits on the card. |
 | **A fast UHS-I card** | Once the buffer is full, the card is the bottleneck. |
-| **Long Exposure NR off** | Otherwise the camera is busy for as long as the exposure after *every* frame. |
-| **High ISO NR off or low** | In-camera processing delays the next frame. |
-| **Manual focus** | No AF hunt between frames. |
+| **Manual focus** | No AF hunt between frames. Already the recommended setup for night work. |
+| **Long Exposure NR, High ISO NR** | Turned off automatically during a burst and restored afterwards. |
 
 One thing NightShoot deliberately does *not* do: capture to the camera's
 internal SDRAM instead of the card. That is faster still — no card write during

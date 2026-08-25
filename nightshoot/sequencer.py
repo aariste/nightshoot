@@ -405,22 +405,30 @@ class Sequencer:
     burst_stall_s = 10.0
 
     #: Target seconds of shooting per native-burst chunk. A trigger blocks until
-    #: its whole chunk is shot, so this is really the stop-latency budget: the
-    #: worst case wait between asking a burst to stop and it stopping. Chunking
-    #: by time rather than by a fixed frame count keeps that latency the same
-    #: whether the camera is doing 11 fps of JPEG or 3 fps of RAW.
+    #: its whole chunk is shot and libgphoto2 exposes no way to abort one, so
+    #: this is really the stop-latency budget: the worst case wait between
+    #: asking a burst to stop and it stopping. Chunking by time rather than by a
+    #: fixed frame count keeps that latency the same whether the camera is doing
+    #: 11 fps of JPEG or 3 fps of RAW.
+    #:
+    #: Longer chunks are faster, but not by much: measured against a simulated
+    #: Z50, going from 2 s to 60 s bought about 4%, and only when the camera
+    #: makes a trigger wait for the buffer to flush. Two seconds is worth far
+    #: more as responsiveness than as throughput. The drive mode, not the chunk
+    #: length, is what closes the gap to the shutter button.
     burst_chunk_s = 2.0
 
     #: Frames in the first chunk, before there is any measured rate to go on.
-    #: Small enough that a short burst is not overshot, large enough to be a
-    #: fair sample of the sustained rate.
-    burst_chunk_first = 4
+    #: A full trigger's overhead is paid for these however few they are, so it
+    #: is worth more than a token sample; still small enough not to overshoot a
+    #: short burst badly.
+    burst_chunk_first = 12
 
     #: Hard ceiling on a chunk, whatever the measured rate suggests. A rate
     #: estimate can be wrong — a first chunk out of an empty buffer looks much
     #: faster than the sustained rate — and an over-long chunk cannot be
     #: interrupted, because libgphoto2 exposes no way to abort one.
-    burst_chunk_max = 64
+    burst_chunk_max = 200
 
     def _run_burst(self, plan: Plan) -> None:
         """Interval-mode burst: fire flat out until the plan says stop."""
@@ -453,6 +461,7 @@ class Sequencer:
                 # leaving the drive mode on continuous would do the same.
                 self.camera.reset_burst_number()
                 self.camera.restore_burst_release()
+                self.camera.restore_speed_overrides()
             if outcome != "fallback":
                 return outcome
         return self._trigger_burst(frames, until_ts, duration_s,
@@ -483,6 +492,13 @@ class Sequencer:
             self._say(f"burst mode: drive set to {applied}")
         else:
             self._say("burst mode: letting the camera drive at its own rate")
+        for key in self.camera.apply_speed_overrides():
+            self._say(f"burst mode: {key} turned off for speed")
+        fmt = str(self.camera.snapshot().get("imageformat") or "")
+        if fmt and not any(w in fmt.lower() for w in ("jpeg", "jpg")):
+            # Not changed automatically: what the frames *are* is the
+            # photographer's decision, not a knob to turn for a benchmark.
+            self._say(f"burst mode: shooting {fmt} — JPEG would be markedly faster")
         self._set_state("exposing")
         consecutive = 0
         fired = 0
