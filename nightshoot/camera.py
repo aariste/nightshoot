@@ -40,7 +40,22 @@ CONFIG_ALIASES = {
     "focusmode": ["focusmode", "focusmode2"],
     "longexpnr": ["longexpnr", "longexposurenoisereduction"],
     "viewfinder": ["viewfinder"],
+    # The drive/release mode (PTP StillCaptureMode). Distinct from
+    # "exposuremode" above, which is the P/S/A/M dial.
+    "releasemode": ["capturemode", "stillcapturemode"],
+    "burstnumber": ["burstnumber"],
 }
+
+#: Preference order for the drive mode used during a burst, matched against
+#: whatever the body actually offers. Continuous-high first because that is the
+#: rate the shutter button gives you; "Burst" next because libgphoto2's own
+#: Nikon capture path treats StillCaptureMode 2 as the mode that pairs with
+#: BurstNumber; continuous-low last as better than nothing.
+BURST_RELEASE_PREFERENCE = (
+    ("continuous", "high"),
+    ("burst",),
+    ("continuous",),
+)
 
 #: Set NIGHTSHOOT_ALLOW_ANY=1 to try a non-Nikon body anyway. Nothing is
 #: blocked beyond the warning; it simply will not have been tested.
@@ -215,6 +230,8 @@ class Camera:
         self._burst_limit: int | None = None
         self._burst_probed = False
         self._burst_number = 1
+        self._release_mode_saved = None
+        self._release_mode_applied = None
         self._manufacturer = ""
         self._vendor_warning: str | None = None
         self._shutter_s: float | None = None
@@ -258,6 +275,8 @@ class Camera:
                     # A fresh session starts at the camera's own setting, and
                     # we have not touched it yet.
                     self._burst_number = 1
+                    self._release_mode_saved = None
+                    self._release_mode_applied = None
                     self._check_vendor()
                     log.info("connected to %s", self._model)
                     self._drain_events(500)
@@ -775,6 +794,68 @@ class Camera:
             log.warning("could not reset burstnumber: %s", exc)
         finally:
             self._burst_number = 1
+
+    def burst_release_choice(self) -> str | None:
+        """The body's fastest continuous drive mode, or None if it has none.
+
+        BurstNumber says *how many* frames a trigger produces; the drive mode
+        says how fast they come. A camera left in single-shot will happily fire
+        the requested number of frames at single-shot cadence, with full
+        between-shot settling — which is most of the difference between this and
+        holding the button down.
+
+        Matched by label against what the body actually lists, because the
+        numeric values are vendor-specific and libgphoto2 leaves several of them
+        unlabelled on Z bodies.
+        """
+        choices = self.get_choices("releasemode")
+        for words in BURST_RELEASE_PREFERENCE:
+            for choice in choices:
+                lowered = choice.lower()
+                if all(word in lowered for word in words):
+                    return choice
+        return None
+
+    def arm_burst_release(self) -> str | None:
+        """Switch to a continuous drive mode, remembering what was there.
+
+        Returns the mode applied, or None if the body has none to offer or
+        refused it — in which case the burst still runs, just slower.
+        """
+        if self._release_mode_saved is not None:
+            return self._release_mode_applied
+        wanted = self.burst_release_choice()
+        if not wanted:
+            return None
+        try:
+            current = self.get_setting("releasemode")
+        except (CameraError, gp.GPhoto2Error):
+            return None
+        if current is not None and str(current) == wanted:
+            return None            # already there; nothing to restore later
+        try:
+            self.set_setting("releasemode", wanted)
+        except (CameraError, gp.GPhoto2Error) as exc:
+            log.warning("could not set the drive mode to %s: %s", wanted, exc)
+            return None
+        self._release_mode_saved = current
+        self._release_mode_applied = wanted
+        return wanted
+
+    def restore_burst_release(self) -> None:
+        """Put the drive mode back to whatever the user had it on.
+
+        Leaving the camera in continuous would make the next single frame fire a
+        burst from one press, which is not what anyone asked for.
+        """
+        if self._release_mode_saved is None:
+            return
+        previous, self._release_mode_saved = self._release_mode_saved, None
+        self._release_mode_applied = None
+        try:
+            self.set_setting("releasemode", previous)
+        except (CameraError, gp.GPhoto2Error) as exc:
+            log.warning("could not restore the drive mode: %s", exc)
 
     def collect_new_files(self, timeout_ms: int = 1, budget_s: float = 0.25) -> list:
         """Drain any files the camera has finished writing. Never blocks long.

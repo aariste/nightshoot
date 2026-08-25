@@ -80,13 +80,15 @@ class TestArmingAndDisarming:
 
 
 class TestBurstUsesTheCamera:
-    def test_one_trigger_per_chunk_not_per_frame(self, sequencer, camera_state,
-                                                 wait_for):
+    def test_far_fewer_triggers_than_frames(self, sequencer, camera_state,
+                                            wait_for):
         sequencer.start(Plan(frames=24, interval_s=0, start_delay_s=0))
         assert wait_for(lambda: not sequencer.running, timeout=60)
         assert sequencer.status()["frames_done"] == 24
-        # 24 frames in chunks of 8 is 3 triggers, not 24.
-        assert camera_state.calls["trigger"] == 3
+        # The camera shoots each chunk itself, so triggers are per chunk. The
+        # exact count depends on the measured rate; what matters is that it is
+        # nothing like one per frame.
+        assert 1 <= camera_state.calls["trigger"] <= 6
 
     def test_every_frame_is_counted(self, sequencer, camera_state, wait_for):
         """Files land after the trigger returns, so the drain must wait for them."""
@@ -125,6 +127,113 @@ class TestBurstUsesTheCamera:
         assert native_s < per_frame_s * 0.75, (
             f"native burst {native_s:.2f}s was not clearly faster than "
             f"per-frame {per_frame_s:.2f}s")
+
+
+class TestDriveMode:
+    """BurstNumber says how many frames; the drive mode says how fast.
+
+    A body left in single-shot fires the requested number of frames with full
+    between-shot settling — which is why setting BurstNumber alone helps but
+    does not match holding the button down.
+    """
+
+    def test_prefers_continuous_high(self, camera):
+        assert camera.burst_release_choice() == "Continuous High Speed"
+
+    def test_falls_back_to_burst(self, camera, camera_state):
+        camera_state.choices["capturemode"] = ["Single Shot", "Burst",
+                                               "Unknown value 8011"]
+        assert camera.burst_release_choice() == "Burst"
+
+    def test_falls_back_to_any_continuous(self, camera, camera_state):
+        camera_state.choices["capturemode"] = ["Single Shot",
+                                               "Continuous Low Speed"]
+        assert camera.burst_release_choice() == "Continuous Low Speed"
+
+    def test_none_when_the_body_offers_nothing(self, camera, camera_state):
+        camera_state.choices["capturemode"] = ["Single Shot", "Timer"]
+        assert camera.burst_release_choice() is None
+
+    def test_armed_before_a_burst(self, sequencer, camera_state, wait_for):
+        original = camera_state.values.get("capturemode")
+
+        sequencer.start(Plan(frames=8, interval_s=0, start_delay_s=0))
+        assert wait_for(lambda: not sequencer.running, timeout=60)
+
+        assert any("Continuous High Speed" in line
+                   for line in sequencer.status()["log"]), \
+            "the drive mode change was not reported"
+        # And put back, or the user's next single frame fires a burst.
+        assert camera_state.values["capturemode"] == original
+
+    def test_restored_after_a_stop(self, sequencer, camera_state, wait_for):
+        camera_state.burst_frame_s = 0.02
+        sequencer.start(Plan(frames=0, interval_s=0, start_delay_s=0))
+        assert wait_for(lambda: sequencer.status()["frames_done"] > 0, timeout=60)
+        sequencer.stop()
+        assert wait_for(lambda: not sequencer.running, timeout=60)
+        assert camera_state.values["capturemode"] == "Single Shot"
+
+    def test_restored_after_an_error(self, sequencer, camera, camera_state,
+                                     monkeypatch, wait_for):
+        from nightshoot.camera import CameraError
+
+        monkeypatch.setattr(camera, "trigger",
+                            lambda: (_ for _ in ()).throw(CameraError("boom")))
+        sequencer.start(Plan(frames=8, interval_s=0, start_delay_s=0,
+                             max_consecutive_errors=1))
+        assert wait_for(lambda: not sequencer.running, timeout=60)
+        assert camera_state.values["capturemode"] == "Single Shot"
+
+    def test_a_body_with_no_drive_mode_still_bursts(self, sequencer, camera_state,
+                                                    wait_for):
+        camera_state.choices["capturemode"] = ["Single Shot"]
+        sequencer.start(Plan(frames=8, interval_s=0, start_delay_s=0))
+        assert wait_for(lambda: not sequencer.running, timeout=60)
+        assert sequencer.status()["frames_done"] == 8
+
+    def test_a_refused_drive_mode_still_bursts(self, sequencer, camera,
+                                               monkeypatch, wait_for):
+        """Slower, but it shoots — better than refusing to run at all."""
+        from nightshoot.camera import CameraError
+
+        real = camera.set_setting
+
+        def refuse(key, value):
+            if key == "releasemode":
+                raise CameraError("read-only right now")
+            return real(key, value)
+
+        monkeypatch.setattr(camera, "set_setting", refuse)
+        sequencer.start(Plan(frames=8, interval_s=0, start_delay_s=0))
+        assert wait_for(lambda: not sequencer.running, timeout=60)
+        assert sequencer.status()["frames_done"] == 8
+
+    def test_it_actually_makes_the_burst_faster(self, sequencer, camera,
+                                                camera_state, wait_for,
+                                                monkeypatch):
+        """The reason the whole thing exists."""
+        def run(with_drive_mode):
+            camera_state.reset()
+            camera_state.burst_frame_s = 0.02
+            camera_state.single_shot_penalty = 4.0
+            camera._burst_probed = False
+            camera._burst_limit = None
+            camera._burst_number = 1
+            camera._release_mode_saved = None
+            started = time.monotonic()
+            sequencer.start(Plan(frames=32, interval_s=0, start_delay_s=0))
+            assert wait_for(lambda: not sequencer.running, timeout=120)
+            assert sequencer.status()["frames_done"] == 32
+            return time.monotonic() - started
+
+        monkeypatch.setattr(camera, "burst_release_choice", lambda: None)
+        without = run(False)
+        monkeypatch.undo()
+        with_mode = run(True)
+        assert with_mode < without * 0.6, (
+            f"continuous drive {with_mode:.2f}s was not clearly faster than "
+            f"single-shot {without:.2f}s")
 
 
 class TestTheCameraIsLeftUsable:

@@ -429,8 +429,8 @@ Worth knowing:
 - There is no `bulb` and no `download` in a burst; both defeat the purpose.
 - A body that cannot fire without waiting for each file makes `burst` fail with
   a clear message rather than quietly running slow captures instead.
-- Stop takes effect at a chunk boundary (8 frames), not instantly — the camera
-  is driving the burst itself and will not be interrupted mid-chunk.
+- Stop takes effect at a chunk boundary — about two seconds — not instantly.
+  The camera is driving the burst itself and cannot be interrupted mid-chunk.
 - Changing image format between phases costs a USB round trip, and the camera
   may still be flushing the previous burst. If the first frame of the next phase
   must be prompt, keep the format the same throughout.
@@ -525,42 +525,53 @@ triggers gets refused with `DeviceBusy` in between — which is exactly what a
 stutter looks like: three fast frames, a stall, one more, a stall.
 
 The way round it is PTP's **BurstNumber** property (`0x5018`, exposed by
-libgphoto2 as `burstnumber`). Set it to N, fire *once*, and the camera runs its
-own continuous drive for N frames at the rate the shutter button would give
-you. The device-ready poll is then paid once per burst instead of once per
-frame. This was confirmed working on the Z50 by the reporter of
+libgphoto2 as `burstnumber`). Set it to N, fire *once*, and the camera shoots N
+frames itself, paying the device-ready poll once per burst instead of once per
+frame. Confirmed working on the Z50 in
 [libgphoto2#968](https://github.com/gphoto/libgphoto2/issues/968), on the
 libgphoto2 maintainer's suggestion.
 
-NightShoot fires in **chunks of 8** rather than one enormous burst. A trigger
-blocks until the whole chunk is written, so the chunk size is the granularity
-at which stop, pause and the end of a timed burst can take effect — eight
-frames keeps that responsive while still amortising the poll. For a timed
-burst the chunk shrinks as the deadline approaches, so `burst: {seconds: 10}`
-does not overshoot by a whole chunk.
+**BurstNumber alone is not enough**, which is the part that is easy to miss. It
+says *how many* frames a trigger produces; the camera's **drive mode**
+(`StillCaptureMode`, `0x5013`, the `capturemode` widget) says *how fast* they
+come. A body left in Single Shot will obediently fire the requested number of
+frames with full between-shot settling — better than one trigger per frame, but
+nothing like continuous release. NightShoot therefore also switches the drive
+mode to the fastest continuous option the body lists, preferring
+*Continuous High Speed* → *Burst* → any *Continuous* mode, and puts it back
+afterwards. The log line says which one it picked.
 
-Two things follow that are worth knowing:
+Three more things follow that are worth knowing:
 
-- **BurstNumber is reset to 1 when the burst ends** — on the way out of a
-  normal finish, a stop, or an error. Left armed, it would silently turn every
-  later single frame (a test shot, the next interval sequence) into a burst.
-  It is also cleared at the start of every run, in case a previous one died
-  mid-burst.
-- **A body that does not expose it still works**, on the old per-frame path.
-  Slower, but it shoots.
+- **Chunking is by time, not frame count.** A trigger blocks until its whole
+  chunk is shot and libgphoto2 exposes no way to abort one
+  (`PTP_OC_NIKON_TerminateCapture` exists in the protocol but no libgphoto2
+  function calls it), so chunk length *is* the stop-latency budget. NightShoot
+  targets ~2 seconds per chunk, sized from the rate it measured on the previous
+  chunk, with a hard cap so a bad estimate cannot produce an uninterruptible
+  burst.
+- **Files are not waited for between chunks.** Collecting only what has already
+  landed and moving straight to the next chunk keeps the camera's buffer topped
+  up. Waiting for every file first let the buffer drain to empty while the
+  shutter sat idle — worth several fps on its own.
+- **BurstNumber and the drive mode are both restored when the burst ends** — on
+  a normal finish, a stop, or an error. Left set, the next single frame (a test
+  shot, the next interval sequence) would fire a burst. BurstNumber is also
+  cleared at the start of every run, in case a previous one died mid-burst.
+
+A body that exposes none of this still works, on the old per-frame path.
 
 NightShoot also keeps its own overhead out of the way: the shutter speed is read
 from a short-lived cache rather than re-queried every frame, and preview
 thumbnails are skipped entirely during a burst.
 
-**It will still not quite match holding the shutter button down**, because the
-files have to be reported over USB and the camera is doing that as well as
-shooting. But the gap is much smaller than a per-frame trigger loop, and the
-limit is now the card and the buffer rather than the protocol.
+**It will still not perfectly match holding the button down**, because the files
+have to be reported over USB while the camera is both shooting and writing. But
+the remaining gap is the card and the buffer rather than the protocol.
 
 > An earlier version of this README claimed the per-frame rate was a hard
 > protocol limit. That was wrong — the limit was `nikon_wait_busy`, and
-> BurstNumber avoids it.
+> BurstNumber plus a continuous drive mode avoids most of it.
 
 What moves the needle after that is the camera:
 
@@ -571,6 +582,12 @@ What moves the needle after that is the camera:
 | **Long Exposure NR off** | Otherwise the camera is busy for as long as the exposure after *every* frame. |
 | **High ISO NR off or low** | In-camera processing delays the next frame. |
 | **Manual focus** | No AF hunt between frames. |
+
+One thing NightShoot deliberately does *not* do: capture to the camera's
+internal SDRAM instead of the card. That is faster still — no card write during
+the burst — but the frames then only exist in the camera's RAM until they are
+downloaded over USB, and a night sequence that outruns the download loses them.
+Files on the card is the safer default for unattended shooting.
 
 The shipped `fast-burst.yaml` example is set up along these lines.
 

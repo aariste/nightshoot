@@ -71,7 +71,7 @@ class FakeCameraState:
             "imageformat": "NEF (Raw)", "capturetarget": "Memory card",
             "expprogram": "M", "batterylevel": "84%", "bulb": 0,
             "longexpnr": "0", "focusmode": "Manual", "viewfinder": 0,
-            "burstnumber": 1,
+            "burstnumber": 1, "capturemode": "Single Shot",
         }
         self.choices = {
             "shutterspeed": list(Z50_SHUTTER),
@@ -79,6 +79,9 @@ class FakeCameraState:
             "f-number": ["f/1.8", "f/2.8", "f/4"],
             "imageformat": ["JPEG Fine", "NEF (Raw)"],
             "capturetarget": ["Internal RAM", "Memory card"],
+            # As a Z body lists them: libgphoto2 leaves some values unlabelled.
+            "capturemode": ["Single Shot", "Burst", "Continuous Low Speed",
+                            "Continuous High Speed", "Unknown value 8019"],
         }
         self.readonly = set()
         self.counter = 0
@@ -106,6 +109,19 @@ class FakeCameraState:
         self.burst_number_readonly = False
         # What one native-burst frame costs once the camera is driving itself.
         self.burst_frame_s = 0.0
+        # A camera left in single-shot fires the requested number of frames but
+        # settles between each one, so a burst is only as fast as the drive mode
+        # allows. This is the multiplier applied when the mode is not continuous.
+        self.single_shot_penalty = 1.0
+        # How many frames the camera can hold before the shutter has to wait for
+        # the card. This is what the buffer indicator counts down. 0 = unlimited,
+        # which keeps the simple tests simple.
+        self.buffer_depth = 0
+        # Per-frame card write time. Card writes are serial and run in the
+        # background while the shutter keeps firing — that is the whole point of
+        # the buffer, and why a burst only slows once the buffer fills.
+        self.card_write_s = 0.0
+        self._card_free_at = 0.0     # when the card finishes what it has queued
         # While a burst is in flight a Nikon reports its changing buffer depth,
         # so the event queue is a steady drip of property changes with files
         # among them. A drain that only stops on a timeout never sees one.
@@ -117,9 +133,36 @@ class FakeCameraState:
         self.manufacturer = "Nikon Corporation"
 
     def queue_file(self, name):
-        """Record a fired frame, ready for collection once the card has it."""
-        self.pending_files.append((_time.monotonic() + self.write_s,
-                                   CameraFilePath(name)))
+        """Record a fired frame, ready for collection once the card has it.
+
+        Without a card model (``card_write_s`` unset) a frame is available after
+        a flat ``write_s`` — enough for tests that only care that files are not
+        instant. With one, writes are serialised behind each other, so a burst
+        fired faster than the card can absorb backs up exactly as a real one
+        does.
+        """
+        now = _time.monotonic()
+        if self.card_write_s:
+            start = max(now, self._card_free_at)
+            ready_at = start + self.card_write_s
+            self._card_free_at = ready_at
+        else:
+            ready_at = now + self.write_s
+        self.pending_files.append((ready_at, CameraFilePath(name)))
+
+    def buffer_used(self):
+        """Frames shot but not yet written to the card — the buffer indicator."""
+        now = _time.monotonic()
+        return sum(1 for ready_at, _ in self.pending_files if ready_at > now)
+
+    def await_buffer_room(self):
+        """Block the shutter while the buffer is full, as the camera does."""
+        if not self.buffer_depth:
+            return
+        while self.buffer_used() >= self.buffer_depth:
+            soonest = min(ready_at for ready_at, _ in self.pending_files
+                          if ready_at > _time.monotonic())
+            _time.sleep(max(0.0, soonest - _time.monotonic()))
 
     def next_ready_file(self):
         """Pop the oldest frame the card has finished writing, if any."""
@@ -310,8 +353,19 @@ def _build_module() -> types.ModuleType:
             # With BurstNumber armed the camera shoots that many frames itself,
             # and libgphoto2 does not return until the whole burst is done.
             count = int(STATE.values.get("burstnumber", 1) or 1)
-            _time.sleep(STATE.cost["trigger"] + STATE.burst_frame_s * count)
+            _time.sleep(STATE.cost["trigger"])
+            # Single-shot cadence is slower than continuous, however many frames
+            # BurstNumber asks for.
+            mode = str(STATE.values.get("capturemode", "")).lower()
+            continuous = "continuous" in mode or "burst" in mode
+            per_frame = STATE.burst_frame_s * (
+                1.0 if continuous else STATE.single_shot_penalty)
             for _ in range(count):
+                # The shutter runs at its own cadence until the buffer fills,
+                # then waits for the card — which is what makes a real burst
+                # start fast and settle slower.
+                STATE.await_buffer_room()
+                _time.sleep(per_frame)
                 STATE.counter += 1
                 STATE.queue_file(f"DSC_{STATE.counter:04d}.NEF")
 
